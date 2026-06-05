@@ -1,0 +1,18 @@
+# 비밀 정보 (절대 깃허브에 올리면 안 됨!)
+.env
+
+# 데이터 / 상태 파일 (개인 데이터, 용량)
+*.db
+*.db-wal
+*.db-shm
+state.json
+report.png
+
+# 파이썬 캐시 / 가상환경
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# OS 부스러기
+.DS_Store

@@ -1,0 +1,33 @@
+# 깃허브에 코드를 올릴(push) 때마다 자동으로 "코드가 깨지지 않았는지" 검사하는 설정.
+# (실제 매매는 절대 돌리지 않음 — 문법/임포트만 점검. API 키도 필요 없음.)
+# 포트폴리오에서 "CI 적용함"으로 어필할 수 있는 부분.
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 패키지 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 문법 검사 (전체 컴파일)
+        run: python -m compileall .
+
+      - name: 임포트 스모크 테스트
+        run: python -c "import config, db, strategy, trader, notifier, bot, backtest, ingest, transform, quality, pipeline, report; print('전 모듈 임포트 정상')"

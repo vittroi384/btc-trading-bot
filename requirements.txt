@@ -1,0 +1,15 @@
+# 이 봇에 필요한 파이썬 패키지 목록입니다.
+# 설치 방법:  pip install -r requirements.txt
+#
+#   pyupbit       : 업비트 거래소와 통신 (시세 조회, 주문 넣기)
+#   requests      : 인터넷 통신 (텔레그램 메시지 전송 등)
+#   python-dotenv : .env 파일에서 설정값 읽어오기
+#   pandas        : 가격 데이터를 표로 다루기 (지표 계산)
+#   matplotlib    : 리포트 차트(report.py) 그리기
+#   ※ DB(SQLite)는 파이썬에 기본 내장이라 따로 설치할 게 없음
+
+pyupbit
+requests
+python-dotenv
+pandas
+matplotlib
