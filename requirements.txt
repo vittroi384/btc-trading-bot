@@ -13,3 +13,7 @@ requests
 python-dotenv
 pandas
 matplotlib
+
+#   flask, waitress : 웹 대시보드(dashboard.py) — 브라우저로 현황/차트 + 일시정지/재개
+flask
+waitress

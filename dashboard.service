@@ -1,0 +1,26 @@
+# 웹 대시보드(dashboard.py)를 24시간 자동 실행 + 꺼지면 자동 재시작.
+# 브라우저에서 http://<서버IP>/ 로 접속해 현황을 보고 일시정지/재개를 누를 수 있다.
+# 설치: README 의 systemd 부분과 동일 (cp → daemon-reload → enable --now).
+# ※ .env 에 DASH_USER / DASH_PASS 를 먼저 넣어야 대시보드가 시작된다(비번 없으면 중단됨).
+# ※ systemd 설정은 한 줄 끝에 주석을 못 달아서, 설명을 전부 윗줄에 적었음.
+
+[Unit]
+Description=BTC Bot Web Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ↓↓↓ 본인 환경에 맞게 사용자/경로 수정 (오라클 우분투 기본 계정은 보통 ubuntu)
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc-trading-bot
+ExecStart=/home/ubuntu/btc-trading-bot/venv/bin/python /home/ubuntu/btc-trading-bot/dashboard.py
+Restart=always
+RestartSec=10
+# 80 처럼 1024 미만 포트에 '일반 사용자'로도 바인딩할 수 있게 해주는 권한.
+# (이게 있어야 root 아닌 ubuntu 계정으로 80 포트를 열 수 있음)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

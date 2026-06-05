@@ -14,6 +14,7 @@
 #  ★ 처음엔 .env 의 DRY_RUN=true (연습 모드)로 충분히 돌려본 뒤 실거래로 바꾸세요. ★
 # =====================================================================
 
+import json       # 일시정지/재개 신호를 파일로 주고받기 (웹 대시보드와 공유)
 import threading  # 동시에 두 가지 일 하기 (차트 만드는 동안 중복 실행 막는 '자물쇠'에 사용)
 import time       # 시간 관련 (일정 간격으로 쉬기 등)
 
@@ -26,6 +27,30 @@ from config import CONFIG                                   # 설정 꾸러미
 from strategy import compute_indicators, generate_signal    # 지표 계산 + 신호 판단
 from trader import Trader                                    # 주문/기록 담당
 from notifier import TelegramNotifier                        # 텔레그램 담당
+
+
+# 웹 대시보드와 공유하는 '일시정지' 신호 파일.
+#  - 대시보드의 ⏸/▶️ 버튼이 이 파일을 바꾸면, 봇이 매 루프마다 읽어서 따릅니다.
+#  - 텔레그램 /pause·/resume 도 이 파일을 갱신해서, 둘이 항상 같은 상태를 봅니다.
+CONTROL_FILE = "control.json"
+
+
+def _read_paused():
+    """control.json 을 읽어 '일시정지 중인지'(True/False)를 돌려줍니다. (없으면 False)"""
+    try:
+        with open(CONTROL_FILE, "r", encoding="utf-8") as fp:
+            return bool(json.load(fp).get("paused", False))
+    except Exception:
+        return False
+
+
+def _write_paused(value):
+    """일시정지 상태를 control.json 에 기록합니다. (웹 대시보드와 공유하기 위해)"""
+    try:
+        with open(CONTROL_FILE, "w", encoding="utf-8") as fp:
+            json.dump({"paused": bool(value)}, fp)
+    except Exception:
+        pass
 
 
 def fmt(x):
@@ -70,13 +95,15 @@ def main():
         notifier.send(status_text(trader, price))
 
     def do_pause():
-        """/pause 명령 -> 매매를 잠시 멈춥니다."""
+        """/pause 명령 -> 매매를 잠시 멈춥니다. (웹 대시보드와도 상태 공유)"""
         flags["paused"] = True
+        _write_paused(True)
         notifier.send("⏸ 매매를 일시정지했어. /resume 으로 재개.")
 
     def do_resume():
-        """/resume 명령 -> 매매를 다시 시작합니다."""
+        """/resume 명령 -> 매매를 다시 시작합니다. (웹 대시보드와도 상태 공유)"""
         flags["paused"] = False
+        _write_paused(False)
         notifier.send("▶️ 매매를 재개했어.")
 
     def do_stop():
@@ -134,6 +161,7 @@ def main():
     # ===== 여기서부터가 '계속 반복되는 매매 루프' 입니다 =====
     while flags["running"]:        # 종료 신호가 오기 전까지 무한 반복
         try:
+            flags["paused"] = _read_paused()   # 웹 대시보드/텔레그램이 바꾼 일시정지 상태 반영
             if flags["paused"]:    # 일시정지 상태면 아무것도 안 하고 잠깐 쉽니다
                 time.sleep(cfg["LOOP_SECONDS"])
                 continue
