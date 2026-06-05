@@ -133,6 +133,35 @@ def _won(x):
         return "-"
 
 
+def _nav(active):
+    """상단 탭(현황 / DB) 만들기."""
+    def tab(href, label, key):
+        return f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>'
+    return '<div class="nav">' + tab("/", "📊 현황", "home") + tab("/db", "🗄 DB", "db") + "</div>"
+
+
+def _num(x, dec=0):
+    """숫자를 콤마 + 소수자리수로. NaN/None 은 '-'."""
+    try:
+        if x is None:
+            return "-"
+        xf = float(x)
+        if xf != xf:   # NaN 검사
+            return "-"
+        return f"{xf:,.{dec}f}"
+    except Exception:
+        return "-"
+
+
+def _table_html(headers, rows):
+    """헤더/행 목록으로 HTML 표를 만든다. (행 없으면 '데이터 없음')"""
+    if not rows:
+        return '<div class="empty">데이터 없음</div>'
+    head = "".join(f"<th>{h}</th>" for h in headers)
+    body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+    return f'<div class="tbl-wrap"><table class="db"><tr>{head}</tr>{body}</table></div>'
+
+
 CSS = """
 <style>
   * { box-sizing: border-box; }
@@ -167,6 +196,14 @@ CSS = """
   th { color:#8b93a7; font-weight:600; }
   .green { color:#22d39a; } .red { color:#ff5470; } .muted { color:#8b93a7; }
   .empty { color:#8b93a7; padding:18px 4px; }
+  .nav { display:flex; gap:8px; margin-bottom:16px; }
+  .nav a { padding:8px 16px; border-radius:10px; border:1px solid #283250; color:#8b93a7;
+           text-decoration:none; font-size:14px; }
+  .nav a.active { color:#e7ebf5; border-color:#3ec6ff; }
+  h2.sec { font-size:14px; color:#8b93a7; margin:22px 0 8px; font-weight:600; letter-spacing:.5px; }
+  .tbl-wrap { overflow-x:auto; border:1px solid #283250; border-radius:12px; }
+  table.db { font-size:12.5px; }
+  table.db th { position:sticky; top:0; background:#141a2b; }
   @media (max-width:640px){ .grid{ grid-template-columns:repeat(2,1fr); } }
 </style>
 """
@@ -228,6 +265,8 @@ def index():
         <span class="upd">{CONFIG['TICKER']} · {CONFIG['INTERVAL']} · 갱신 {time.strftime('%H:%M:%S')}</span>
       </div>
 
+      {_nav('home')}
+
       <div class="grid">
         <div class="card"><div class="k">현재가</div><div class="v" style="color:{COL['price']}">{price_txt}</div></div>
         <div class="card"><div class="k">실현손익</div><div class="v {pnl_cls}">{pnl:+,.0f}원</div></div>
@@ -276,6 +315,84 @@ def pause():
 def resume():
     write_paused(False)
     return redirect("/")
+
+
+@app.route("/db")
+@require_auth
+def db_view():
+    import db
+    market, tf, dbf = CONFIG["TICKER"], CONFIG["INTERVAL"], CONFIG["DB_FILE"]
+
+    try:
+        stats = db.get_stats(dbf, market, tf)
+    except Exception:
+        stats = {"candle_count": 0, "first": None, "last": None}
+
+    # --- 매매 기록 (최신순, 최대 200) ---
+    try:
+        tdf = db.get_trades(dbf, limit=200)
+    except Exception:
+        tdf = None
+    trows = []
+    if tdf is not None and len(tdf):
+        for _, row in tdf.iterrows():
+            side_html = ('<span class="green">매수</span>' if row.get("side") == "buy"
+                         else '<span class="red">매도</span>')
+            pnl = row.get("pnl")
+            if pnl is None or (isinstance(pnl, float) and pnl != pnl):
+                pnl_html = '<span class="muted">-</span>'
+            else:
+                pnl_html = f'<span class="{"green" if pnl >= 0 else "red"}">{pnl:+,.0f}</span>'
+            trows.append([str(row.get("ts", "")).replace("T", " "), side_html,
+                          _num(row.get("price")), _num(row.get("krw")),
+                          _num(row.get("amount"), 8), pnl_html, row.get("mode", "")])
+    trades_tbl = _table_html(["시각", "구분", "가격", "금액(원)", "수량", "손익(원)", "모드"], trows)
+
+    # --- 최근 지표 30 ---
+    try:
+        idf = db.get_recent_indicators(dbf, market, tf, limit=30)
+    except Exception:
+        idf = None
+    irows = []
+    if idf is not None and len(idf):
+        for ts, row in idf.iloc[::-1].iterrows():
+            irows.append([str(ts), _num(row.get("close")), _num(row.get("ma_short")),
+                          _num(row.get("ma_long")), _num(row.get("rsi"), 1),
+                          _num(row.get("bb_lower")), _num(row.get("bb_upper"))])
+    ind_tbl = _table_html(["시각", "종가", "MA단기", "MA장기", "RSI", "BB하단", "BB상단"], irows)
+
+    # --- 최근 원본 시세 30 ---
+    try:
+        cdf = db.get_recent_candles(dbf, market, tf, limit=30)
+    except Exception:
+        cdf = None
+    crows = []
+    if cdf is not None and len(cdf):
+        for ts, row in cdf.iloc[::-1].iterrows():
+            crows.append([str(ts), _num(row["open"]), _num(row["high"]),
+                          _num(row["low"]), _num(row["close"]), _num(row["volume"], 3)])
+    candles_tbl = _table_html(["시각", "시가", "고가", "저가", "종가", "거래량"], crows)
+
+    rng = f'{str(stats["first"])[:16]} ~ {str(stats["last"])[:16]}' if stats["last"] else "-"
+    body = f"""
+    <div class="wrap">
+      <div class="top"><h1>BTC TRADING BOT</h1>
+        <span class="upd">{market} · {tf} · 갱신 {time.strftime('%H:%M:%S')}</span></div>
+      {_nav('db')}
+      <div class="hold">창고 현황 · 캔들 <b>{stats['candle_count']:,}</b>개 · 기간 {rng}</div>
+      <h2 class="sec">매매 기록 (trades)</h2>
+      {trades_tbl}
+      <h2 class="sec">최근 지표 30 (indicators)</h2>
+      {ind_tbl}
+      <h2 class="sec">최근 원본 시세 30 (raw_candles)</h2>
+      {candles_tbl}
+    </div>
+    """
+    html = ("<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+            "<meta http-equiv='refresh' content='30'>"
+            "<title>BTC Bot · DB</title>" + CSS + "</head><body>" + body + "</body></html>")
+    return html
 
 
 if __name__ == "__main__":
