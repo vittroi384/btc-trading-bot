@@ -14,9 +14,12 @@
 #  ★ 처음엔 .env 의 DRY_RUN=true (연습 모드)로 충분히 돌려본 뒤 실거래로 바꾸세요. ★
 # =====================================================================
 
-import time    # 시간 관련 (일정 간격으로 쉬기 등)
+import threading  # 동시에 두 가지 일 하기 (차트 만드는 동안 중복 실행 막는 '자물쇠'에 사용)
+import time       # 시간 관련 (일정 간격으로 쉬기 등)
 
 import pyupbit  # 업비트 통신 도구
+
+import db        # 데이터 창고 (차트 그리기 전 테이블 준비 확인용)
 
 # 우리가 만든 다른 파일들에서 필요한 것들을 가져옵니다.
 from config import CONFIG                                   # 설정 꾸러미
@@ -81,18 +84,49 @@ def main():
         flags["running"] = False
         notifier.send("🛑 봇을 종료할게.")
 
+    # 차트 만드는 작업이 '한 번에 하나만' 돌도록 막는 자물쇠 (버튼 빠르게 두 번 눌러도 안전)
+    report_lock = threading.Lock()
+
+    def do_report():
+        """📊 차트 버튼 / /report 명령 -> 최신 차트를 만들어 텔레그램으로 '사진'으로 보냅니다."""
+        # 이미 만드는 중이면 중복으로 또 만들지 않습니다.
+        if not report_lock.acquire(blocking=False):
+            notifier.send("📊 차트 만드는 중이야. 잠깐만!")
+            return
+        try:
+            notifier.send("📊 차트 만드는 중… (몇 초 걸려)")
+            db.init_db(cfg["DB_FILE"])          # 테이블 있는지 확인(없으면 생성 → 안전)
+            from report import make_chart        # 무거운 그래프 라이브러리는 '필요할 때만' 불러옴
+            path = make_chart(cfg)               # report.png 생성 후 경로 반환(데이터 없으면 None)
+            if not path:
+                notifier.send("아직 그릴 데이터가 부족해. 잠시 후 다시 눌러줘.")
+                return
+            try:
+                price = trader.get_price()       # 캡션에 넣을 현재가
+            except Exception:
+                price = None
+            # 차트 사진 + 현재 상태 요약(캡션)을 함께 보냅니다.
+            notifier.send_photo(path, caption=status_text(trader, price))
+        except Exception as e:
+            notifier.send(f"⚠️ 차트 생성 실패: {e}")
+        finally:
+            report_lock.release()  # 무슨 일이 있어도 자물쇠는 반드시 풉니다
+
     # 위에서 만든 함수들을 텔레그램 비서에게 '이 명령엔 이 함수 써' 라고 연결합니다.
     notifier.on_status = do_status
     notifier.on_pause = do_pause
     notifier.on_resume = do_resume
     notifier.on_stop = do_stop
+    notifier.on_report = do_report
     notifier.start_command_listener()  # 명령 듣기 시작
 
-    # 시작 알림 보내기
+    # 시작 알림 보내기 (+ 화면 아래 '버튼 키보드' 띄우기)
     mode = "모의(DRY_RUN)" if cfg["DRY_RUN"] else "실거래"
     notifier.send(
         f"🤖 봇 시작! 종목 {cfg['TICKER']} / {cfg['INTERVAL']} / 모드 {mode}\n"
-        "명령: /status /pause /resume /stop"
+        "아래 버튼으로 조작해 — 📊 차트 / 📈 상태 / ⏸ 정지 / ▶️ 재개\n"
+        "명령: /status /report /pause /resume /stop",
+        with_buttons=True,
     )
 
     last_summary = time.time()  # 마지막으로 요약 보낸 시각 기록
