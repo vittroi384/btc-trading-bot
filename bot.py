@@ -178,12 +178,14 @@ def main():
                 time.sleep(cfg["LOOP_SECONDS"])
                 continue
 
-            # 3) 손절/익절 먼저 확인 (코인을 들고 있다면)
+            # 3) 손절/익절/트레일링 먼저 확인 (코인을 들고 있다면)
+            trader.track_peak(price)          # 보유 중 최고가 갱신(트레일링 스탑용)
             risk = trader.check_risk(price)
-            if risk:                          # 손절 또는 익절 선에 닿았으면 즉시 매도
+            if risk:                          # 위험관리 선에 닿았으면 즉시 매도
                 result, err = trader.sell(price)
                 if result:
-                    tag = "손절" if risk == "stop_loss" else "익절"
+                    tag = {"stop_loss": "손절", "take_profit": "익절",
+                           "trailing_stop": "트레일링"}.get(risk, "청산")
                     notifier.send(
                         f"🔻 매도({tag}) @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n\n"
                         + status_text(trader, price)

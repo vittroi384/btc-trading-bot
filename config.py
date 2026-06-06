@@ -66,6 +66,19 @@ CONFIG = {
     "STOP_LOSS_PCT": _get_float("STOP_LOSS_PCT", -5.0),     # 손절: 산 가격보다 -5% 떨어지면 자동 매도
     "TAKE_PROFIT_PCT": _get_float("TAKE_PROFIT_PCT", 8.0),  # 익절: 산 가격보다 +8% 오르면 자동 매도
 
+    # ----- 트레일링 스탑(고점 추적 손절): 0이면 끔 -----
+    #  들고 있는 동안의 '최고가' 대비 이만큼(%) 떨어지면 팝니다. 수익을 길게 끌고 가는 장치.
+    #  ★ TRAIL_STOP_PCT > 0 이면, 위의 고정 익절(TAKE_PROFIT_PCT)은 무시하고 트레일링으로 판다.
+    #     (고정 익절이 먼저 잘라버리면 트레일링의 의미가 없어지기 때문)
+    "TRAIL_STOP_PCT": _get_float("TRAIL_STOP_PCT", 4.0),
+
+    # ----- 추세 필터: 하락장에서 '떨어지는 칼 잡기'(눌림목 매수)를 막는 장치 -----
+    #  USE_TREND_FILTER=true 면, 종가가 장기추세선(TREND_MA) 위에 있을 때만 '눌림목 매수'를 허용.
+    #  (골든크로스·구름 돌파 같은 추세 신호는 이 필터와 무관하게 그대로 작동)
+    "USE_TREND_FILTER": _get_bool("USE_TREND_FILTER", "true"),
+    "TREND_MA": _get_int("TREND_MA", 100),  # 장기추세 판단용 이동평균 기간(1시간봉 기준 약 4일)
+
+
     # ----- 전략에 쓰이는 숫자들 (strategy.py 에서 사용) -----
     "MA_SHORT": _get_int("MA_SHORT", 5),       # 단기 이동평균선 기간 (예: 최근 5봉 평균)
     "MA_LONG": _get_int("MA_LONG", 20),        # 장기 이동평균선 기간 (예: 최근 20봉 평균)

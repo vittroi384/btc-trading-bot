@@ -82,6 +82,7 @@ def compute_indicators(df, cfg):
     df = add_rsi(df, cfg["RSI_PERIOD"])
     df = add_bollinger(df, cfg["BB_PERIOD"], cfg["BB_STD"])
     df = add_ichimoku(df)
+    df["trend_ma"] = df["close"].rolling(cfg.get("TREND_MA", 100)).mean()  # 장기추세선(추세 필터용)
     return df
 
 
@@ -91,7 +92,7 @@ def min_required_rows(cfg):
     일목균형표가 과거 52봉 + 26봉 이동을 쓰기 때문에 넉넉히 잡습니다.
     데이터가 이보다 적으면 아직 판단하지 않고 기다립니다.
     """
-    return max(cfg["MA_LONG"], cfg["BB_PERIOD"], cfg["RSI_PERIOD"], 52) + 26 + 1
+    return max(cfg["MA_LONG"], cfg["BB_PERIOD"], cfg["RSI_PERIOD"], cfg.get("TREND_MA", 100), 52) + 26 + 1
 
 
 # =====================================================================
@@ -136,7 +137,10 @@ def generate_signal(df, holding, cfg):
 
     # ---------- [매수] 아래 중 하나라도 참이면 산다 (단, 과열이면 보류) ----------
     # 1번 묶음은 '둘 다'(AND) 만족해야 함 → 진짜 싼 자리에서만 사서 헛매수를 줄임
-    dip_buy = (last["close"] < last["bb_lower"]) and (rsi <= cfg["RSI_BUY_DIP"])  # 볼린저 하단 AND RSI 과매도
+    # 추세 필터: 하락장에서 '떨어지는 칼 잡기'를 막으려고, 추세가 위일 때만 눌림목 매수를 허용.
+    #  (USE_TREND_FILTER=false 면 필터가 꺼져 예전처럼 동작. 골든크로스·구름 돌파는 필터와 무관.)
+    uptrend = (not cfg.get("USE_TREND_FILTER", False)) or (last["close"] > last.get("trend_ma", float("nan")))
+    dip_buy = (last["close"] < last["bb_lower"]) and (rsi <= cfg["RSI_BUY_DIP"]) and uptrend  # 볼린저 하단 AND RSI 과매도 AND 추세 위
     buy_signal = (
         dip_buy            # 1) (볼린저 하단 + RSI 과매도) 동시 → "확실히 싼 자리"
         or golden_cross    # 2) 골든크로스(상승 전환)

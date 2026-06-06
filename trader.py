@@ -81,6 +81,7 @@ class Trader:
             "win_count": 0,          # 이익 보고 판 횟수
             "realized_pnl": 0.0,     # 실현 손익: 실제로 사고팔아 확정된 누적 손익(원)
             "invested": 0.0,         # 지금 들고 있는 코인을 사는 데 들어간 원화
+            "peak_price": 0.0,       # 보유 중 기록한 '최고가' (트레일링 스탑 계산용)
             "trades": [],            # 거래 기록 목록(리스트). 사고팔 때마다 하나씩 추가됨
         }
 
@@ -178,6 +179,7 @@ class Trader:
         self.state["invested"] = new_cost
         self.state["entry_price"] = new_cost / new_amt if new_amt > 0 else 0.0
         self.state["holding"] = True            # 이제 코인을 들고 있는 상태
+        self.state["peak_price"] = max(self.state.get("peak_price", 0.0), price)  # 트레일링용 최고가 시작점
         self.state["buy_count"] += 1            # 매수 횟수 +1
         self.state["trade_count"] += 1          # 총 거래 +1
         # 거래 기록에 한 줄 추가
@@ -232,26 +234,54 @@ class Trader:
         self.state["coin_amount"] = 0.0
         self.state["invested"] = 0.0
         self.state["entry_price"] = 0.0
+        self.state["peak_price"] = 0.0
         self._save_state()
         self._log_trade_db("sell", price, proceeds, amount, pnl, at_time=at_time)  # 데이터 창고에도 기록
         return {"side": "sell", "price": price, "krw": proceeds, "amount": amount, "pnl": pnl}, None
 
-    # -------------------- 손절 / 익절 확인 --------------------
+    # -------------------- 손절 / 익절 / 트레일링 확인 --------------------
+    def track_peak(self, price):
+        """보유 중 '최고가'를 갱신합니다. (트레일링 스탑 계산의 기준점)
+        bot.py 가 매 루프 check_risk 직전에 불러줍니다."""
+        if not self.state["holding"]:
+            return
+        if price > self.state.get("peak_price", 0.0):
+            self.state["peak_price"] = price
+            self._save_state()
+
     def check_risk(self, price):
         """
-        들고 있는 동안, 미리 정한 손절/익절 선에 닿았는지 확인합니다.
-        - 손실이 STOP_LOSS_PCT 이하  -> "stop_loss"   (손절하고 팔아라)
-        - 이익이 TAKE_PROFIT_PCT 이상 -> "take_profit" (익절하고 팔아라)
-        - 둘 다 아니면 None (아직 보유)
+        들고 있는 동안, 미리 정한 위험관리 선에 닿았는지 확인합니다.
+        - 손실이 STOP_LOSS_PCT 이하        -> "stop_loss"     (손절)
+        - (트레일링 켠 경우) 최고가 대비 TRAIL_STOP_PCT 만큼 하락 -> "trailing_stop"
+        - (트레일링 끈 경우) 이익이 TAKE_PROFIT_PCT 이상 -> "take_profit" (고정 익절)
+        - 아무것도 아니면 None (계속 보유)
+        ★ 트레일링을 켜면(TRAIL_STOP_PCT>0) 고정 익절은 무시합니다.
+          (고정 익절이 먼저 잘라버리면 수익을 길게 끌고 가는 트레일링 의미가 사라지므로)
         """
         if not self.state["holding"] or self.state["entry_price"] <= 0:
             return None
-        # 산 가격 대비 현재 몇 % 인지 계산
-        change_pct = (price - self.state["entry_price"]) / self.state["entry_price"] * 100
+        entry = self.state["entry_price"]
+        change_pct = (price - entry) / entry * 100  # 산 가격 대비 현재 변화율(%)
+
+        # 1) 손절 (가장 우선) — 산 가격 대비 너무 떨어지면 무조건 판다
         if self.cfg["STOP_LOSS_PCT"] < 0 and change_pct <= self.cfg["STOP_LOSS_PCT"]:
             return "stop_loss"
-        if self.cfg["TAKE_PROFIT_PCT"] > 0 and change_pct >= self.cfg["TAKE_PROFIT_PCT"]:
-            return "take_profit"
+
+        trail = self.cfg.get("TRAIL_STOP_PCT", 0.0)
+        if trail and trail > 0:
+            # 2) 트레일링 스탑: '보유 중 최고가' 대비 trail% 떨어지면 판다.
+            #    단, 최고가가 산 가격보다 trail% 이상 높아진 뒤(=충분히 수익권)부터 작동.
+            peak = max(self.state.get("peak_price", 0.0), entry)
+            peak_gain = (peak - entry) / entry * 100
+            if peak_gain >= trail:                       # 트레일링 활성화 조건
+                drop_from_peak = (peak - price) / peak * 100
+                if drop_from_peak >= trail:
+                    return "trailing_stop"
+        else:
+            # 3) 트레일링을 안 쓸 때만 '고정 익절' 사용
+            if self.cfg["TAKE_PROFIT_PCT"] > 0 and change_pct >= self.cfg["TAKE_PROFIT_PCT"]:
+                return "take_profit"
         return None
 
     # -------------------- 통계(성적표) 만들기 --------------------

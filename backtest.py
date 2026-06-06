@@ -28,6 +28,7 @@ def run_backtest(df, cfg, start_krw=1_000_000):
     krw = start_krw   # 현재 가진 원화
     coin = 0.0        # 현재 가진 코인 수량
     entry = 0.0       # 산 가격
+    peak = 0.0        # 보유 중 최고가 (트레일링 스탑용)
     holding = False   # 들고 있는지
     trades = sells = wins = 0   # 거래 수, 매도 수, 이긴 횟수
     realized = 0.0    # 누적 실현 손익
@@ -38,12 +39,22 @@ def run_backtest(df, cfg, start_krw=1_000_000):
         window = df.iloc[: i + 1]            # 처음부터 i번째 봉까지 (그 시점에 볼 수 있는 데이터)
         price = float(window.iloc[-1]["close"])  # 그 시점의 종가
 
-        # (1) 손절/익절 먼저 확인
+        # (1) 손절/트레일링/익절 먼저 확인 (trader.check_risk 와 동일한 규칙)
         if holding and entry > 0:
-            chg = (price - entry) / entry * 100  # 산 가격 대비 변화율(%)
-            hit = (cfg["STOP_LOSS_PCT"] < 0 and chg <= cfg["STOP_LOSS_PCT"]) or \
-                  (cfg["TAKE_PROFIT_PCT"] > 0 and chg >= cfg["TAKE_PROFIT_PCT"])
-            if hit:  # 손절 또는 익절 선에 닿으면 팝니다
+            peak = max(peak, price)                   # 보유 중 최고가 갱신
+            chg = (price - entry) / entry * 100        # 산 가격 대비 변화율(%)
+            hit = False
+            if cfg["STOP_LOSS_PCT"] < 0 and chg <= cfg["STOP_LOSS_PCT"]:
+                hit = True                            # 손절
+            else:
+                trail = cfg.get("TRAIL_STOP_PCT", 0.0)
+                if trail and trail > 0:               # 트레일링 켜짐
+                    peak_gain = (peak - entry) / entry * 100
+                    if peak_gain >= trail and (peak - price) / peak * 100 >= trail:
+                        hit = True                    # 최고가 대비 trail% 하락
+                elif cfg["TAKE_PROFIT_PCT"] > 0 and chg >= cfg["TAKE_PROFIT_PCT"]:
+                    hit = True                        # 고정 익절(트레일링 끈 경우만)
+            if hit:  # 위험관리 선에 닿으면 팝니다
                 proceeds = coin * price * (1 - FEE)
                 pnl = proceeds - coin * entry
                 realized += pnl
@@ -51,7 +62,7 @@ def run_backtest(df, cfg, start_krw=1_000_000):
                 wins += 1 if pnl > 0 else 0
                 sells += 1
                 trades += 1
-                holding, coin, entry = False, 0.0, 0.0
+                holding, coin, entry, peak = False, 0.0, 0.0, 0.0
                 continue
 
         # (2) 전략 신호 확인
@@ -61,6 +72,7 @@ def run_backtest(df, cfg, start_krw=1_000_000):
             if spend >= 5000:
                 coin = spend * (1 - FEE) / price
                 entry = price
+                peak = price
                 krw -= spend
                 holding = True
                 trades += 1
@@ -72,7 +84,7 @@ def run_backtest(df, cfg, start_krw=1_000_000):
             wins += 1 if pnl > 0 else 0
             sells += 1
             trades += 1
-            holding, coin, entry = False, 0.0, 0.0
+            holding, coin, entry, peak = False, 0.0, 0.0, 0.0
 
     # 끝났을 때, 들고 있는 코인은 마지막 가격으로 평가해 총자산을 계산합니다.
     last_price = float(df.iloc[-1]["close"])
@@ -91,8 +103,8 @@ def run_backtest(df, cfg, start_krw=1_000_000):
 # 이 파일을 '직접' 실행하면 아래가 동작합니다.
 if __name__ == "__main__":
     cfg = CONFIG
-    # 업비트에서 최근 200봉 가져오기
-    df = pyupbit.get_ohlcv(cfg["TICKER"], interval=cfg["INTERVAL"], count=200)
+    # 업비트에서 최근 봉 가져오기 (200개를 넘으면 pyupbit 가 알아서 나눠 받아옵니다)
+    df = pyupbit.get_ohlcv(cfg["TICKER"], interval=cfg["INTERVAL"], count=2000)
     if df is None:
         print("데이터를 못 가져왔어. 인터넷/티커를 확인해.")
     else:
