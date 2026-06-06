@@ -22,7 +22,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patheffects as pe
 from matplotlib import font_manager, rcParams
 from matplotlib.ticker import FuncFormatter
-from matplotlib.patches import Rectangle, Polygon
+from matplotlib.patches import Rectangle, Polygon, Patch
 import numpy as np
 import pandas as pd
 
@@ -135,6 +135,25 @@ def _gradient_under(ax, xnum, y, color, ylo, yhi):
     im.set_clip_path(poly)
 
 
+def _draw_candles(ax, xnum, o, h, l, c, width, up_col, dn_col):
+    """가격 패널에 캔들(봉)차트를 그린다. 상승(종가≥시가)=초록, 하락=빨강.
+    - 심지(고가~저가)는 얇은 세로선, 몸통(시가~종가)은 사각형으로 그립니다."""
+    up = c >= o
+    colors = np.where(up, up_col, dn_col)
+    # 심지: 고가~저가를 잇는 얇은 세로선(한 번에 그림)
+    ax.vlines(xnum, l, h, color=colors, linewidth=0.9, zorder=4)
+    # 몸통: 시가~종가 사각형(봉마다)
+    for i in range(len(xnum)):
+        col = up_col if up[i] else dn_col
+        lo = min(o[i], c[i])
+        hi = max(o[i], c[i])
+        height = hi - lo
+        if height <= 0:                       # 시가=종가(도지)면 아주 얇은 몸통으로 보이게
+            height = (h[i] - l[i]) * 0.02 or (lo * 1e-4 or 1e-6)
+        ax.add_patch(Rectangle((xnum[i] - width / 2, lo), width, height,
+                               facecolor=col, edgecolor=col, linewidth=0.6, zorder=5))
+
+
 def make_chart(cfg, out_path="report.png"):
     """다크 대시보드 차트(가격·볼린저·거래량·RSI·매매·KPI)를 PNG로 저장한다."""
     market, timeframe, db_file = cfg["TICKER"], cfg["INTERVAL"], cfg["DB_FILE"]
@@ -151,20 +170,25 @@ def make_chart(cfg, out_path="report.png"):
     kor = _set_korean_font()
     if kor:
         T = {"close": "종가", "bb": "볼린저밴드", "ma": "장기 이평선", "vol": "거래량",
-             "buy": "매수", "sell": "매도",
+             "buy": "매수", "sell": "매도", "up": "상승", "dn": "하락",
              "k_price": "최근가", "k_pnl": "실현손익", "k_win": "승률", "k_cnt": "매매"}
     else:
         print("한글 폰트가 없어 영어 라벨로 표시합니다. "
               "한글로 보려면  sudo apt install -y fonts-nanum  후 다시 실행하세요.")
         T = {"close": "Close", "bb": "Bollinger", "ma": "Long MA", "vol": "Volume",
-             "buy": "Buy", "sell": "Sell",
+             "buy": "Buy", "sell": "Sell", "up": "Up", "dn": "Down",
              "k_price": "Last", "k_pnl": "Realized P&L", "k_win": "Win rate", "k_cnt": "Trades"}
 
     xnum = mdates.date2num(df.index.to_pydatetime())
+    o = df["open"].values
+    h = df["high"].values
+    l = df["low"].values
     close = df["close"].values
+    step = np.median(np.diff(xnum)) if len(xnum) > 1 else 0.04   # 봉 간격(캔들·거래량 막대 너비용)
     last_t, last_p = xnum[-1], float(close[-1])
-    pad = (close.max() - close.min()) * 0.10 or close.max() * 0.02
-    ylo, yhi = close.min() - pad, close.max() + pad
+    hi_all, lo_all = float(np.nanmax(h)), float(np.nanmin(l))     # 심지까지 포함해 y범위 산정
+    pad = (hi_all - lo_all) * 0.10 or hi_all * 0.02
+    ylo, yhi = lo_all - pad, hi_all + pad
 
     trades = db.get_trades(db_file)
     n_tr, realized, win_rate = _trade_stats(trades)
@@ -204,15 +228,13 @@ def make_chart(cfg, out_path="report.png"):
         ax0.text(x + 0.022, 0.33, val, transform=ax0.transAxes,
                  fontsize=16, fontweight="bold", color=col, va="center")
 
-    # ===== 1) 가격 패널 =====
-    _gradient_under(ax1, xnum, close, C["price"], ylo, yhi)
+    # ===== 1) 가격 패널 (캔들/봉 차트) =====
     ax1.fill_between(xnum, df["bb_lower"], df["bb_upper"],
                      color=C["bb_fill"], alpha=0.10, zorder=2, label=T["bb"])
     ax1.plot(xnum, df["bb_upper"], color=C["bb_edge"], linewidth=0.8, zorder=2)
     ax1.plot(xnum, df["bb_lower"], color=C["bb_edge"], linewidth=0.8, zorder=2)
     ax1.plot(xnum, df["ma_long"], color=C["ma"], linewidth=1.3, alpha=0.95, zorder=3, label=T["ma"])
-    ln, = ax1.plot(xnum, close, color=C["price"], linewidth=2.0, zorder=4, label=T["close"])
-    ln.set_path_effects([pe.Stroke(linewidth=5, foreground=C["price"], alpha=0.18), pe.Normal()])
+    _draw_candles(ax1, xnum, o, h, l, close, step * 0.7, C["vol_up"], C["vol_dn"])  # 종가 선 대신 캔들
 
     if n_tr:
         trades["ts"] = pd.to_datetime(trades["ts"])
@@ -232,9 +254,13 @@ def make_chart(cfg, out_path="report.png"):
     ax1.set_ylim(ylo, yhi)
     ax1.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v/1e4:,.0f}만"))
     ax1.tick_params(labelbottom=False)
-    leg = ax1.legend(loc="upper left", fontsize=9, frameon=True, facecolor=C["panel"],
-                     edgecolor=C["card_edge"], framealpha=0.92, ncol=2,
-                     labelcolor=C["text"])
+    # 범례에 상승/하락 봉 색을 함께 표시
+    h_handles, h_labels = ax1.get_legend_handles_labels()
+    up_proxy = Patch(facecolor=C["vol_up"], edgecolor=C["vol_up"])
+    dn_proxy = Patch(facecolor=C["vol_dn"], edgecolor=C["vol_dn"])
+    leg = ax1.legend([up_proxy, dn_proxy] + h_handles, [T["up"], T["dn"]] + h_labels,
+                     loc="upper left", fontsize=9, frameon=True, facecolor=C["panel"],
+                     edgecolor=C["card_edge"], framealpha=0.92, ncol=3, labelcolor=C["text"])
     leg.set_zorder(8)
 
     # ===== 2) 거래량 패널 =====
