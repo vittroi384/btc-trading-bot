@@ -10,6 +10,7 @@
 
 import json                    # json: 파이썬 데이터를 파일로 저장/읽기 좋은 형식으로 바꿔주는 도구
 import os                      # os: 파일이 있는지 확인하는 등 파일 작업용
+import time                    # time: 주문 후 잔고가 반영될 때까지 잠깐 기다리기 위한 도구
 from datetime import datetime  # 현재 날짜·시간을 기록하기 위한 도구
 
 import pyupbit                 # pyupbit: 업비트와 통신(시세 조회, 주문 등)을 쉽게 해주는 도구
@@ -113,6 +114,30 @@ class Trader:
         bal = self.upbit.get_balance("KRW")   # 실거래면 진짜 잔고 조회
         return float(bal) if bal else 0.0
 
+    def get_coin_balance(self):
+        """실거래에서 '지금 실제로 들고 있는 코인 수량'(주문가능 수량)을 업비트에서 조회합니다.
+        매도할 때는 우리가 추정한 값이 아니라 '진짜 잔고'를 팔아야 거절당하지 않습니다."""
+        bal = self.upbit.get_balance(self.ticker)  # 예: KRW-BTC -> BTC 잔고
+        return float(bal) if bal else 0.0
+
+    # -------------------- 주문 응답 점검(성공/실패) --------------------
+    @staticmethod
+    def _order_failed(resp):
+        """업비트 주문 응답이 '실패'인지 알려줍니다(True=실패).
+        pyupbit 는 주문이 실패해도 예외를 던지지 않고
+          - None (네트워크/인증 문제) 또는
+          - {'error': {...}} (업비트가 거절: 잔고부족·최소금액 미달 등)
+        을 돌려줍니다. 그래서 반드시 직접 확인해야 합니다."""
+        return resp is None or (isinstance(resp, dict) and "error" in resp)
+
+    @staticmethod
+    def _order_error_msg(resp):
+        """실패한 주문 응답에서 사람이 읽을 수 있는 사유를 뽑아냅니다."""
+        if isinstance(resp, dict) and isinstance(resp.get("error"), dict):
+            e = resp["error"]
+            return e.get("message") or e.get("name") or "알 수 없는 오류"
+        return "응답 없음(네트워크/API 키/권한 확인 필요)"
+
     # -------------------- 매수 (사기) --------------------
     def buy(self, price, at_time=None):
         """
@@ -136,8 +161,15 @@ class Trader:
             self.state["krw_sim"] -= spend        # 가상 원화에서 쓴 만큼 뺍니다
         else:
             # 실거래: 업비트에 '시장가 매수' 주문을 넣습니다.
-            self.upbit.buy_market_order(self.ticker, spend)
-            amount = (spend * (1 - FEE)) / price  # 체결 수량 근사치
+            before = self.get_coin_balance()                       # 주문 전 실제 보유 코인
+            resp = self.upbit.buy_market_order(self.ticker, spend)  # 주문 결과를 '받아서'
+            if self._order_failed(resp):                           # 실패면 상태를 건드리지 않고 끝냅니다
+                return None, "업비트 매수 주문 실패: " + self._order_error_msg(resp)
+            time.sleep(1.0)                                        # 체결·잔고 반영을 잠깐 기다림
+            after = self.get_coin_balance()                        # 주문 후 실제 보유 코인
+            amount = max(after - before, 0.0)                      # 이번에 '실제로' 산 수량
+            if amount <= 0:                                        # 잔고 반영이 느릴 때만 근사치로 대체
+                amount = (spend * (1 - FEE)) / price
 
         # 평균 매수가 다시 계산 (여러 번 나눠 살 수도 있으니 평균을 냅니다)
         new_amt = self.state["coin_amount"] + amount    # 새 보유 수량
@@ -168,13 +200,20 @@ class Trader:
         if not self.state["holding"] or self.state["coin_amount"] <= 0:
             return None, "보유 수량 없음"
 
-        amount = self.state["coin_amount"]  # 팔 수량 (보유 전량)
-
         if self.dry_run:
+            amount = self.state["coin_amount"]     # 연습 모드: 우리가 기록해 둔 보유 수량
             proceeds = price * amount * (1 - FEE)  # 팔아서 받는 원화(수수료 제외)
             self.state["krw_sim"] += proceeds      # 가상 원화에 더합니다
         else:
-            self.upbit.sell_market_order(self.ticker, amount)  # 실제 시장가 매도
+            # 실거래: '우리 추정치'가 아니라 업비트에 실제로 있는 잔고를 팝니다.
+            #  (추정치는 실제 체결량보다 조금 클 수 있어 '수량 부족'으로 거절당합니다.)
+            amount = self.get_coin_balance()       # 진짜 보유 수량(주문가능)
+            amount = int(amount * 1e8) / 1e8       # 소수점 8자리 아래는 버림(보유량 초과 방지)
+            if amount <= 0:                        # 실제로 들고 있는 게 없으면 매도 불가
+                return None, "업비트 보유 수량이 없어 매도할 수 없음(잔고 0)"
+            resp = self.upbit.sell_market_order(self.ticker, amount)  # 주문 결과를 '받아서'
+            if self._order_failed(resp):                              # 실패면 포지션을 그대로 두고 끝냅니다
+                return None, "업비트 매도 주문 실패: " + self._order_error_msg(resp)
             proceeds = price * amount * (1 - FEE)
 
         cost = self.state["invested"]   # 이 코인을 사는 데 들어갔던 돈

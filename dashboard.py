@@ -12,12 +12,13 @@
 # =====================================================================
 
 import json
+import math
 import os
 import threading
 import time
 from functools import wraps
 
-from flask import Flask, request, Response, redirect, send_file
+from flask import Flask, request, Response, redirect, send_file, jsonify
 from waitress import serve
 from dotenv import load_dotenv
 
@@ -209,6 +210,111 @@ CSS = """
 """
 
 
+# ---------- 화면 자동 갱신 스크립트 (페이지 새로고침 없이 '데이터만' 바꿔 깜빡임 제거) ----------
+#  - 5초마다 /api/state 에서 숫자·상태·매매기록만 받아 화면을 갱신합니다.
+#  - 차트(이미지)는 60초마다, '다 받은 뒤에만' 바꿔치기해서 깜빡이지 않습니다.
+#  - ⏸/▶️ 버튼도 새로고침 없이 동작합니다.
+DASH_JS = """
+<script>
+(function(){
+  function fmt(x, dec){
+    dec = dec || 0;
+    if (x === null || x === undefined || (typeof x === 'number' && !isFinite(x))) return '-';
+    return Number(x).toLocaleString('ko-KR', {minimumFractionDigits:dec, maximumFractionDigits:dec});
+  }
+  function signed(x, dec){
+    if (x === null || x === undefined || (typeof x === 'number' && !isFinite(x))) return '-';
+    return (x >= 0 ? '+' : '') + fmt(x, dec);
+  }
+  function setText(id, t){ var el=document.getElementById(id); if(el) el.textContent=t; }
+
+  function applyState(s){
+    setText('upd-time', s.updated);
+    setText('v-price', s.price ? fmt(s.price)+'원' : '-');
+
+    var pnlEl=document.getElementById('v-pnl');
+    if(pnlEl){ pnlEl.textContent=signed(s.pnl)+'원'; pnlEl.className='v '+(s.pnl>=0?'green':'red'); }
+    var roiEl=document.getElementById('v-roi');
+    if(roiEl){ roiEl.textContent=signed(s.roi,2)+'%'; roiEl.className='v '+(s.roi>=0?'green':'red'); }
+    setText('v-trades', (s.trade_count||0)+'회 · '+Math.round(s.win_rate||0)+'%');
+
+    var holdEl=document.getElementById('hold');
+    if(holdEl){
+      if(s.holding && s.entry_price>0){
+        var u = (s.unreal===null||s.unreal===undefined)
+              ? '<span class="muted">-</span>'
+              : '<span class="'+(s.unreal>=0?'green':'red')+'">'+signed(s.unreal,2)+'%</span>';
+        holdEl.innerHTML='보유중 · 평균매수 <b>'+fmt(s.entry_price)+'원</b> · 수량 '
+                        +Number(s.coin_amount||0).toFixed(8)+' · 평가손익 '+u;
+      } else {
+        holdEl.innerHTML='<span class="muted">보유 없음 (현금)</span>';
+      }
+    }
+
+    var badge=document.getElementById('badge-state');
+    if(badge){
+      badge.className='badge '+(s.paused?'b-pause':'b-run');
+      badge.textContent=s.paused?'⏸ 일시정지':'▶️ 매매중';
+    }
+    var bp=document.getElementById('btn-pause'); if(bp) bp.disabled=!!s.paused;
+    var br=document.getElementById('btn-resume'); if(br) br.disabled=!s.paused;
+
+    var tEl=document.getElementById('trades');
+    if(tEl){
+      if(s.trades && s.trades.length){
+        var rows='';
+        for(var i=0;i<s.trades.length;i++){
+          var t=s.trades[i];
+          var side = t.side==='buy' ? '<span class="green">매수</span>' : '<span class="red">매도</span>';
+          var pl='<span class="muted">-</span>';
+          if(t.side==='sell' && t.pnl!==null && t.pnl!==undefined)
+            pl='<span class="'+(t.pnl>=0?'green':'red')+'">'+signed(t.pnl)+'</span>';
+          rows+='<tr><td>'+t.time+'</td><td>'+side+'</td><td>'+fmt(t.price)+'</td><td>'+fmt(t.krw)+'</td><td>'+pl+'</td></tr>';
+        }
+        tEl.innerHTML='<table><tr><th>시각</th><th>구분</th><th>가격</th><th>금액(원)</th><th>손익(원)</th></tr>'+rows+'</table>';
+      } else {
+        tEl.innerHTML='<div class="empty">아직 매매 기록이 없어요. 신호가 뜨면 여기에 쌓입니다.</div>';
+      }
+    }
+  }
+
+  function poll(){
+    fetch('/api/state', {cache:'no-store'})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(s){ if(s) applyState(s); })
+      .catch(function(){ /* 네트워크 일시 오류는 무시하고 다음 주기에 재시도 */ });
+  }
+
+  function refreshChart(){
+    var img=document.getElementById('chart');
+    if(!img) return;
+    var url='/chart.png?t='+Date.now();
+    var next=new Image();
+    next.onload=function(){ img.src=url; };   // 다 받은 뒤에만 교체 → 깜빡임 없음
+    next.src=url;
+  }
+
+  function send(action){
+    fetch('/'+action, {method:'POST'}).then(poll).catch(function(){});
+  }
+  // ⏸/▶️ 폼 제출을 가로채 새로고침 없이 처리 (자바스크립트 꺼져 있으면 기존 폼 동작이 그대로 작동)
+  var forms=document.querySelectorAll('.ctrl form');
+  for(var i=0;i<forms.length;i++){
+    forms[i].addEventListener('submit', function(e){
+      e.preventDefault();
+      var action=this.getAttribute('action').replace('/','');
+      send(action);
+    });
+  }
+
+  poll();
+  setInterval(poll, 5000);            // 숫자·상태·기록: 5초마다
+  setInterval(refreshChart, 60000);   // 차트: 60초마다 (서버 생성 주기와 맞춤)
+})();
+</script>
+"""
+
+
 @app.route("/")
 @require_auth
 def index():
@@ -220,8 +326,8 @@ def index():
 
     mode_badge = ('<span class="badge b-live">실거래</span>' if live
                   else '<span class="badge b-dry">모의(DRY_RUN)</span>')
-    state_badge = ('<span class="badge b-pause">⏸ 일시정지</span>' if paused
-                   else '<span class="badge b-run">▶️ 매매중</span>')
+    state_badge = ('<span class="badge b-pause" id="badge-state">⏸ 일시정지</span>' if paused
+                   else '<span class="badge b-run" id="badge-state">▶️ 매매중</span>')
 
     pnl = st.get("realized_pnl", 0.0)
     pnl_cls = "green" if pnl >= 0 else "red"
@@ -262,36 +368,77 @@ def index():
       <div class="top">
         <h1>BTC TRADING BOT</h1>
         {mode_badge}{state_badge}
-        <span class="upd">{CONFIG['TICKER']} · {CONFIG['INTERVAL']} · 갱신 {time.strftime('%H:%M:%S')}</span>
+        <span class="upd">{CONFIG['TICKER']} · {CONFIG['INTERVAL']} · 갱신 <span id="upd-time">{time.strftime('%H:%M:%S')}</span></span>
       </div>
 
       {_nav('home')}
 
       <div class="grid">
-        <div class="card"><div class="k">현재가</div><div class="v" style="color:{COL['price']}">{price_txt}</div></div>
-        <div class="card"><div class="k">실현손익</div><div class="v {pnl_cls}">{pnl:+,.0f}원</div></div>
-        <div class="card"><div class="k">누적 수익률</div><div class="v {roi_cls}">{roi:+.2f}%</div></div>
-        <div class="card"><div class="k">매매 / 승률</div><div class="v">{st.get('trade_count', 0)}회 · {win_rate:.0f}%</div></div>
+        <div class="card"><div class="k">현재가</div><div class="v" id="v-price" style="color:{COL['price']}">{price_txt}</div></div>
+        <div class="card"><div class="k">실현손익</div><div class="v {pnl_cls}" id="v-pnl">{pnl:+,.0f}원</div></div>
+        <div class="card"><div class="k">누적 수익률</div><div class="v {roi_cls}" id="v-roi">{roi:+.2f}%</div></div>
+        <div class="card"><div class="k">매매 / 승률</div><div class="v" id="v-trades">{st.get('trade_count', 0)}회 · {win_rate:.0f}%</div></div>
       </div>
 
-      <div class="hold">{hold_html}</div>
+      <div class="hold" id="hold">{hold_html}</div>
 
       <div class="ctrl">
-        <form method="post" action="/pause"><button class="on-pause" {'disabled' if paused else ''}>⏸ 일시정지</button></form>
-        <form method="post" action="/resume"><button class="on-resume" {'disabled' if not paused else ''}>▶️ 재개</button></form>
+        <form method="post" action="/pause"><button id="btn-pause" class="on-pause" {'disabled' if paused else ''}>⏸ 일시정지</button></form>
+        <form method="post" action="/resume"><button id="btn-resume" class="on-resume" {'disabled' if not paused else ''}>▶️ 재개</button></form>
       </div>
 
-      <img class="chart" src="/chart.png?t={int(time.time())}" alt="차트 로딩 중...">
+      <img class="chart" id="chart" src="/chart.png?t={int(time.time())}" alt="차트 로딩 중...">
 
-      {trades_block}
+      <div id="trades">{trades_block}</div>
     </div>
     """
 
     html = ("<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-            "<meta http-equiv='refresh' content='20'>"
-            "<title>BTC Bot</title>" + CSS + "</head><body>" + body + "</body></html>")
+            "<title>BTC Bot</title>" + CSS + "</head><body>" + body + DASH_JS + "</body></html>")
     return html
+
+
+@app.route("/api/state")
+@require_auth
+def api_state():
+    """현황 데이터(숫자·보유상태·최근 매매)를 JSON 으로 돌려줍니다.
+    대시보드 화면이 페이지 새로고침 없이 이걸 주기적으로 받아 갱신합니다(깜빡임 방지)."""
+    st = read_state()
+    price = current_price()
+    paused = read_paused()
+    roi, win_rate, unreal = compute_stats(st, price)
+
+    def safe(x):
+        # JSON 은 NaN/무한대를 표현하지 못하므로 그런 값은 null 로 바꿉니다.
+        if isinstance(x, float) and not math.isfinite(x):
+            return None
+        return x
+
+    trades = []
+    for t in reversed(st.get("trades", [])[-15:]):
+        trades.append({
+            "time": str(t.get("time", "")).replace("T", " "),
+            "side": t.get("side"),
+            "price": safe(t.get("price")),
+            "krw": safe(t.get("krw")),
+            "pnl": safe(t.get("pnl")),
+        })
+
+    return jsonify({
+        "price": safe(price),
+        "pnl": safe(st.get("realized_pnl", 0.0)),
+        "roi": safe(roi),
+        "win_rate": safe(win_rate),
+        "trade_count": st.get("trade_count", 0),
+        "holding": bool(st.get("holding")),
+        "entry_price": safe(st.get("entry_price", 0.0)),
+        "coin_amount": safe(st.get("coin_amount", 0.0)),
+        "unreal": safe(unreal),
+        "paused": bool(paused),
+        "updated": time.strftime("%H:%M:%S"),
+        "trades": trades,
+    })
 
 
 @app.route("/chart.png")

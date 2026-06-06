@@ -55,7 +55,7 @@ def run_backtest(df, cfg, start_krw=1_000_000):
                 continue
 
         # (2) 전략 신호 확인
-        sig = generate_signal(window, holding, cfg)
+        sig, _ = generate_signal(window, holding, cfg)  # 백테스트에선 사유는 안 씀
         if sig == "buy" and not holding:        # 사라 신호 + 현금
             spend = krw * cfg["ORDER_RATIO"] if cfg["USE_RATIO"] else min(cfg["ORDER_KRW"], krw)
             if spend >= 5000:

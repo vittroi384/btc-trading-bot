@@ -108,11 +108,13 @@ def generate_signal(df, holding, cfg):
       holding : 지금 코인을 들고 있는지 (True=보유 중 / False=현금)
       cfg     : 설정 꾸러미
 
-    돌려주는 값: "buy"(사라) / "sell"(팔아라) / "hold"(가만히)
+    돌려주는 값: (신호, 사유)
+      - 신호: "buy"(사라) / "sell"(팔아라) / "hold"(가만히)
+      - 사유: 왜 그렇게 판단했는지 사람이 읽을 글(매수/매도일 때만 채워짐, hold면 "")
     """
     # 데이터가 충분히 쌓이기 전에는 섣불리 판단하지 않고 'hold'(대기)
     if len(df) < min_required_rows(cfg):
-        return "hold"
+        return "hold", ""
 
     last = df.iloc[-1]   # 맨 마지막 줄 = 가장 최근 봉
     prev = df.iloc[-2]   # 그 바로 앞 봉 (직전 봉)
@@ -142,20 +144,40 @@ def generate_signal(df, holding, cfg):
     )
     not_too_hot = rsi < cfg["RSI_BUY_BELOW"]  # 안전장치: RSI가 너무 과열이면 매수 안 함
     if (not holding) and buy_signal and not_too_hot:
-        return "buy"
+        # 어떤 조건이 떠서 샀는지 모아서 알려줍니다(여러 개면 같이 표시).
+        reasons = []
+        if dip_buy:
+            reasons.append(f"볼린저 하단+RSI 과매도({rsi:.1f})")
+        if golden_cross:
+            reasons.append("골든크로스")
+        if cloud_break_up:
+            reasons.append("구름 상향돌파")
+        return "buy", ", ".join(reasons)
 
     # ---------- [매도] 아래 중 하나라도 참이면 판다 ----------
+    over_rsi = rsi >= cfg["RSI_SELL_ABOVE"]      # RSI 과매수
+    over_bb = last["close"] > last["bb_upper"]   # 볼린저 상단 위
     sell_signal = (
-        dead_cross                            # 1) 데드크로스(하락 전환)
-        or (rsi >= cfg["RSI_SELL_ABOVE"])     # 2) RSI 과매수(많이 오름)
-        or (last["close"] > last["bb_upper"]) # 3) 볼린저 상단 위(상대적으로 비쌈)
-        or cloud_break_dn                     # 4) 일목 구름 하향 이탈
+        dead_cross        # 1) 데드크로스(하락 전환)
+        or over_rsi       # 2) RSI 과매수(많이 오름)
+        or over_bb        # 3) 볼린저 상단 위(상대적으로 비쌈)
+        or cloud_break_dn # 4) 일목 구름 하향 이탈
     )
     if holding and sell_signal:
-        return "sell"
+        # 어떤 조건이 떠서 팔았는지 모아서 알려줍니다.
+        reasons = []
+        if dead_cross:
+            reasons.append("데드크로스")
+        if over_rsi:
+            reasons.append(f"RSI 과매수({rsi:.1f})")
+        if over_bb:
+            reasons.append("볼린저 상단돌파")
+        if cloud_break_dn:
+            reasons.append("구름 하향이탈")
+        return "sell", ", ".join(reasons)
 
     # 살 신호도 팔 신호도 없으면 가만히
-    return "hold"
+    return "hold", ""
 
 # -------------------------------------------------------------------
 #  [전략을 바꾸고 싶다면?]

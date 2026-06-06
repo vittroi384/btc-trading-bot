@@ -181,34 +181,40 @@ def main():
             # 3) 손절/익절 먼저 확인 (코인을 들고 있다면)
             risk = trader.check_risk(price)
             if risk:                          # 손절 또는 익절 선에 닿았으면 즉시 매도
-                result, _ = trader.sell(price)
+                result, err = trader.sell(price)
                 if result:
                     tag = "손절" if risk == "stop_loss" else "익절"
                     notifier.send(
                         f"🔻 매도({tag}) @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n\n"
                         + status_text(trader, price)
                     )
+                elif err:                     # 주문이 실제로 실패하면 '성공'인 척하지 않고 알립니다
+                    notifier.send("⚠️ 매도 실패(보유 유지): " + err)
                 time.sleep(cfg["LOOP_SECONDS"])
                 continue
 
             # 4) 전략 신호에 따라 매수/매도
-            signal = generate_signal(df, trader.state["holding"], cfg)
+            signal, reason = generate_signal(df, trader.state["holding"], cfg)
             if signal == "buy" and not trader.state["holding"]:      # 사라 신호 + 현금 상태
                 result, err = trader.buy(price)
                 if result:
                     notifier.send(
-                        f"🟢 매수 @ {fmt(price)} / {fmt(result['krw'])}\n\n"
+                        f"🟢 매수 @ {fmt(price)} / {fmt(result['krw'])}\n"
+                        f"📌 사유: {reason}\n\n"
                         + status_text(trader, price)
                     )
                 elif err:
                     notifier.send("매수 보류: " + err)
             elif signal == "sell" and trader.state["holding"]:       # 팔아라 신호 + 보유 상태
-                result, _ = trader.sell(price)
+                result, err = trader.sell(price)
                 if result:
                     notifier.send(
-                        f"🔴 매도 @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n\n"
+                        f"🔴 매도 @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n"
+                        f"📌 사유: {reason}\n\n"
                         + status_text(trader, price)
                     )
+                elif err:                     # 주문이 실제로 실패하면 '성공'인 척하지 않고 알립니다
+                    notifier.send("⚠️ 매도 실패(보유 유지): " + err)
 
             # 5) 일정 시간마다 정기 요약 보내기
             if time.time() - last_summary >= cfg["SUMMARY_EVERY_MIN"] * 60:
