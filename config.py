@@ -40,6 +40,12 @@ def _get_int(key, default):
     return int(v) if v not in (None, "") else int(default)
 
 
+def _get_list(key, default):
+    """쉼표로 구분된 목록을 리스트로. 예: 'KRW-BTC, KRW-ETH' -> ['KRW-BTC','KRW-ETH']"""
+    raw = os.getenv(key, default)
+    return [x.strip().upper() for x in raw.split(",") if x.strip()]
+
+
 # ---------------------------------------------------------------------
 #  CONFIG: 봇이 사용할 모든 설정을 모아둔 '설정 꾸러미'입니다.
 #  이런 "이름: 값" 형태의 꾸러미를 파이썬에서는 '딕셔너리'라고 부릅니다.
@@ -55,7 +61,9 @@ CONFIG = {
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),      # 알림 받을 '내 채팅 번호'
 
     # ----- 거래 기본 설정 -----
-    "TICKER": os.getenv("TICKER", "KRW-BTC"),       # 무엇을 거래할지. KRW-BTC = 원화로 비트코인
+    "TICKER": os.getenv("TICKER", "KRW-BTC"),       # (단일) 백테스트·차트가 쓰는 기준 종목
+    # 실거래 봇이 '동시에 굴릴' 종목들(쉼표로 여러 개). 예: KRW-BTC,KRW-ETH
+    "TICKERS": _get_list("TICKERS", "KRW-BTC,KRW-ETH"),
     "INTERVAL": os.getenv("INTERVAL", "minute60"),  # 캔들(봉) 하나의 시간 단위. minute60 = 1시간봉
     "LOOP_SECONDS": _get_int("LOOP_SECONDS", 60),   # 몇 초마다 시세를 다시 확인할지 (60 = 1분마다)
     "ORDER_KRW": _get_float("ORDER_KRW", 10000),    # 한 번 매수할 때 쓸 금액(원)

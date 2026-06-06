@@ -58,12 +58,13 @@ def fmt(x):
     return f"{x:,.0f}원"
 
 
-def status_text(trader, price):
-    """현재 성적표(상태)를 사람이 읽기 좋은 글로 만들어 돌려줍니다."""
+def status_text(trader, price, coin=None):
+    """한 코인의 현재 성적표(상태)를 사람이 읽기 좋은 글로 만들어 돌려줍니다."""
     st = trader.stats(price)  # 통계 계산
     mode = "모의" if CONFIG["DRY_RUN"] else "실거래"
+    head = coin if coin else CONFIG["TICKER"]
     lines = [
-        f"📊 [{CONFIG['TICKER']}] 상태 ({mode})",
+        f"📊 [{head}] 상태 ({mode})",
         f"현재가: {fmt(price)}" if price else "현재가: -",
         f"총 매매: {st['trade_count']}회 (매수 {st['buy_count']} / 매도 {st['sell_count']})",
         f"실현손익: {fmt(st['realized_pnl'])} (누적 수익률 {st['roi']:.2f}%)",
@@ -77,22 +78,43 @@ def status_text(trader, price):
     return "\n".join(lines)  # 여러 줄을 줄바꿈으로 합쳐서 하나의 글로 만듭니다
 
 
+def status_all(traders, prices):
+    """여러 코인의 상태를 한 번에 묶어서 돌려줍니다. (/status·정기요약용)"""
+    mode = "모의" if CONFIG["DRY_RUN"] else "실거래"
+    blocks = [f"📊 전체 현황 ({mode})"]
+    for coin, trader in traders.items():
+        blocks.append("──────────")
+        blocks.append(status_text(trader, prices.get(coin), coin))
+    return "\n".join(blocks)
+
+
 def main():
     """프로그램의 시작점. 여기서 모든 게 돌아갑니다."""
     cfg = CONFIG
     notifier = TelegramNotifier(cfg["TELEGRAM_BOT_TOKEN"], cfg["TELEGRAM_CHAT_ID"])  # 텔레그램 비서 준비
-    trader = Trader(cfg)                                                            # 매매 담당 준비
+
+    # ----- 여러 종목을 한 봇에서 굴리기 -----
+    coins = cfg["TICKERS"]                 # 예: ['KRW-BTC', 'KRW-ETH']
+    primary = cfg["TICKER"] if cfg["TICKER"] in coins else coins[0]  # 차트는 이 종목 하나만 그림
+    traders = {}                           # 코인 -> Trader. 코인별로 상태 파일을 따로 둡니다.
+    for coin in coins:
+        coin_cfg = dict(cfg)               # 설정을 복사해 종목별로 살짝 바꿔줍니다
+        coin_cfg["TICKER"] = coin
+        coin_cfg["STATE_FILE"] = f"state_{coin}.json"   # 예: state_KRW-BTC.json
+        traders[coin] = Trader(coin_cfg)
     # 봇의 현재 상태를 담는 작은 꾸러미: 일시정지 중인지, 계속 돌지
     flags = {"paused": False, "running": True}
 
     # ----- 텔레그램 명령이 왔을 때 실행할 함수들을 정의합니다 -----
     def do_status():
-        """/status 명령 -> 현재 성적표를 보냅니다."""
-        try:
-            price = trader.get_price()
-        except Exception:
-            price = None
-        notifier.send(status_text(trader, price))
+        """/status 명령 -> 모든 종목의 현재 성적표를 보냅니다."""
+        prices = {}
+        for coin, tr in traders.items():
+            try:
+                prices[coin] = tr.get_price()
+            except Exception:
+                prices[coin] = None
+        notifier.send(status_all(traders, prices))
 
     def do_pause():
         """/pause 명령 -> 매매를 잠시 멈춥니다. (웹 대시보드와도 상태 공유)"""
@@ -124,16 +146,19 @@ def main():
             notifier.send("📊 차트 만드는 중… (몇 초 걸려)")
             db.init_db(cfg["DB_FILE"])          # 테이블 있는지 확인(없으면 생성 → 안전)
             from report import make_chart        # 무거운 그래프 라이브러리는 '필요할 때만' 불러옴
-            path = make_chart(cfg)               # report.png 생성 후 경로 반환(데이터 없으면 None)
+            chart_cfg = dict(cfg); chart_cfg["TICKER"] = primary   # 차트는 기준 종목 하나만 그림
+            path = make_chart(chart_cfg)         # report.png 생성 후 경로 반환(데이터 없으면 None)
             if not path:
                 notifier.send("아직 그릴 데이터가 부족해. 잠시 후 다시 눌러줘.")
                 return
-            try:
-                price = trader.get_price()       # 캡션에 넣을 현재가
-            except Exception:
-                price = None
-            # 차트 사진 + 현재 상태 요약(캡션)을 함께 보냅니다.
-            notifier.send_photo(path, caption=status_text(trader, price))
+            prices = {}
+            for coin, tr in traders.items():
+                try:
+                    prices[coin] = tr.get_price()
+                except Exception:
+                    prices[coin] = None
+            # 차트(기준 종목) + 전체 상태 요약(캡션)을 함께 보냅니다.
+            notifier.send_photo(path, caption=f"📈 차트: {primary}\n\n" + status_all(traders, prices))
         except Exception as e:
             notifier.send(f"⚠️ 차트 생성 실패: {e}")
         finally:
@@ -150,7 +175,7 @@ def main():
     # 시작 알림 보내기 (+ 화면 아래 '버튼 키보드' 띄우기)
     mode = "모의(DRY_RUN)" if cfg["DRY_RUN"] else "실거래"
     notifier.send(
-        f"🤖 봇 시작! 종목 {cfg['TICKER']} / {cfg['INTERVAL']} / 모드 {mode}\n"
+        f"🤖 봇 시작! 종목 {', '.join(coins)} / {cfg['INTERVAL']} / 모드 {mode}\n"
         "아래 버튼으로 조작해 — 📊 차트 / 📈 상태 / ⏸ 정지 / ▶️ 재개\n"
         "명령: /status /report /pause /resume /stop",
         with_buttons=True,
@@ -166,61 +191,65 @@ def main():
                 time.sleep(cfg["LOOP_SECONDS"])
                 continue
 
-            # 1) 최근 200개 봉(가격 데이터) 가져오기
-            df = pyupbit.get_ohlcv(cfg["TICKER"], interval=cfg["INTERVAL"], count=200)
-            if df is None or len(df) == 0:   # 못 가져왔으면 잠깐 쉬고 다시
-                time.sleep(cfg["LOOP_SECONDS"])
-                continue
-            df = compute_indicators(df, cfg)  # 2) 지표 계산
+            # 종목마다 차례로: 데이터 받기 → 지표 → 위험관리 → 신호 매매
+            for coin, trader in traders.items():
+                df = pyupbit.get_ohlcv(coin, interval=cfg["INTERVAL"], count=200)
+                if df is None or len(df) == 0:   # 이 종목 데이터를 못 받았으면 건너뛰고 다음 종목
+                    continue
+                df = compute_indicators(df, cfg)  # 지표 계산(전략 설정은 모든 종목 공통)
 
-            price = trader.get_price()        # 현재가 확인
-            if price is None:
-                time.sleep(cfg["LOOP_SECONDS"])
-                continue
+                price = trader.get_price()        # 이 종목 현재가
+                if price is None:
+                    continue
 
-            # 3) 손절/익절/트레일링 먼저 확인 (코인을 들고 있다면)
-            trader.track_peak(price)          # 보유 중 최고가 갱신(트레일링 스탑용)
-            risk = trader.check_risk(price)
-            if risk:                          # 위험관리 선에 닿았으면 즉시 매도
-                result, err = trader.sell(price)
-                if result:
-                    tag = {"stop_loss": "손절", "take_profit": "익절",
-                           "trailing_stop": "트레일링"}.get(risk, "청산")
-                    notifier.send(
-                        f"🔻 매도({tag}) @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n\n"
-                        + status_text(trader, price)
-                    )
-                elif err:                     # 주문이 실제로 실패하면 '성공'인 척하지 않고 알립니다
-                    notifier.send("⚠️ 매도 실패(보유 유지): " + err)
-                time.sleep(cfg["LOOP_SECONDS"])
-                continue
+                # (a) 손절/익절/트레일링 먼저 확인
+                trader.track_peak(price)          # 보유 중 최고가 갱신(트레일링용)
+                risk = trader.check_risk(price)
+                if risk:                          # 위험관리 선에 닿았으면 즉시 매도
+                    result, err = trader.sell(price)
+                    if result:
+                        tag = {"stop_loss": "손절", "take_profit": "익절",
+                               "trailing_stop": "트레일링"}.get(risk, "청산")
+                        notifier.send(
+                            f"🔻 [{coin}] 매도({tag}) @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n\n"
+                            + status_text(trader, price, coin)
+                        )
+                    elif err:                     # 주문이 실제로 실패하면 '성공'인 척하지 않고 알림
+                        notifier.send(f"⚠️ [{coin}] 매도 실패(보유 유지): " + err)
+                    continue                      # 이 종목은 끝, 다음 종목으로
 
-            # 4) 전략 신호에 따라 매수/매도
-            signal, reason = generate_signal(df, trader.state["holding"], cfg)
-            if signal == "buy" and not trader.state["holding"]:      # 사라 신호 + 현금 상태
-                result, err = trader.buy(price)
-                if result:
-                    notifier.send(
-                        f"🟢 매수 @ {fmt(price)} / {fmt(result['krw'])}\n"
-                        f"📌 사유: {reason}\n\n"
-                        + status_text(trader, price)
-                    )
-                elif err:
-                    notifier.send("매수 보류: " + err)
-            elif signal == "sell" and trader.state["holding"]:       # 팔아라 신호 + 보유 상태
-                result, err = trader.sell(price)
-                if result:
-                    notifier.send(
-                        f"🔴 매도 @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n"
-                        f"📌 사유: {reason}\n\n"
-                        + status_text(trader, price)
-                    )
-                elif err:                     # 주문이 실제로 실패하면 '성공'인 척하지 않고 알립니다
-                    notifier.send("⚠️ 매도 실패(보유 유지): " + err)
+                # (b) 전략 신호에 따라 매수/매도
+                signal, reason = generate_signal(df, trader.state["holding"], cfg)
+                if signal == "buy" and not trader.state["holding"]:      # 사라 신호 + 현금
+                    result, err = trader.buy(price)
+                    if result:
+                        notifier.send(
+                            f"🟢 [{coin}] 매수 @ {fmt(price)} / {fmt(result['krw'])}\n"
+                            f"📌 사유: {reason}\n\n"
+                            + status_text(trader, price, coin)
+                        )
+                    elif err:
+                        notifier.send(f"[{coin}] 매수 보류: " + err)
+                elif signal == "sell" and trader.state["holding"]:       # 팔아라 신호 + 보유
+                    result, err = trader.sell(price)
+                    if result:
+                        notifier.send(
+                            f"🔴 [{coin}] 매도 @ {fmt(price)} / 손익 {fmt(result['pnl'])}\n"
+                            f"📌 사유: {reason}\n\n"
+                            + status_text(trader, price, coin)
+                        )
+                    elif err:                     # 주문이 실제로 실패하면 '성공'인 척하지 않고 알림
+                        notifier.send(f"⚠️ [{coin}] 매도 실패(보유 유지): " + err)
 
-            # 5) 일정 시간마다 정기 요약 보내기
+            # 일정 시간마다 정기 요약(전체 종목) 보내기
             if time.time() - last_summary >= cfg["SUMMARY_EVERY_MIN"] * 60:
-                notifier.send("⏱ 정기 요약\n" + status_text(trader, price))
+                prices = {}
+                for coin, tr in traders.items():
+                    try:
+                        prices[coin] = tr.get_price()
+                    except Exception:
+                        prices[coin] = None
+                notifier.send("⏱ 정기 요약\n" + status_all(traders, prices))
                 last_summary = time.time()
 
         except Exception as e:

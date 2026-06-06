@@ -86,13 +86,27 @@ def write_paused(value):
         json.dump({"paused": bool(value)}, fp)
 
 
-def current_price():
-    """업비트에서 현재가를 가져옵니다. (공개 시세라 키 불필요)"""
+def current_price(ticker):
+    """업비트에서 해당 종목의 현재가를 가져옵니다. (공개 시세라 키 불필요)"""
     try:
         import pyupbit
-        return pyupbit.get_current_price(CONFIG["TICKER"])
+        return pyupbit.get_current_price(ticker)
     except Exception:
         return None
+
+
+def coins_list():
+    """대시보드가 보여줄 종목 목록. (봇과 동일하게 TICKERS 사용)"""
+    return CONFIG.get("TICKERS") or [CONFIG["TICKER"]]
+
+
+def read_state_for(coin):
+    """해당 종목의 상태파일(state_<코인>.json)을 읽어옵니다. (없으면 빈 값)"""
+    try:
+        with open(f"state_{coin}.json", "r", encoding="utf-8") as fp:
+            return json.load(fp)
+    except Exception:
+        return {}
 
 
 def compute_stats(st, price):
@@ -230,26 +244,6 @@ DASH_JS = """
 
   function applyState(s){
     setText('upd-time', s.updated);
-    setText('v-price', s.price ? fmt(s.price)+'원' : '-');
-
-    var pnlEl=document.getElementById('v-pnl');
-    if(pnlEl){ pnlEl.textContent=signed(s.pnl)+'원'; pnlEl.className='v '+(s.pnl>=0?'green':'red'); }
-    var roiEl=document.getElementById('v-roi');
-    if(roiEl){ roiEl.textContent=signed(s.roi,2)+'%'; roiEl.className='v '+(s.roi>=0?'green':'red'); }
-    setText('v-trades', (s.trade_count||0)+'회 · '+Math.round(s.win_rate||0)+'%');
-
-    var holdEl=document.getElementById('hold');
-    if(holdEl){
-      if(s.holding && s.entry_price>0){
-        var u = (s.unreal===null||s.unreal===undefined)
-              ? '<span class="muted">-</span>'
-              : '<span class="'+(s.unreal>=0?'green':'red')+'">'+signed(s.unreal,2)+'%</span>';
-        holdEl.innerHTML='보유중 · 평균매수 <b>'+fmt(s.entry_price)+'원</b> · 수량 '
-                        +Number(s.coin_amount||0).toFixed(8)+' · 평가손익 '+u;
-      } else {
-        holdEl.innerHTML='<span class="muted">보유 없음 (현금)</span>';
-      }
-    }
 
     var badge=document.getElementById('badge-state');
     if(badge){
@@ -259,19 +253,47 @@ DASH_JS = """
     var bp=document.getElementById('btn-pause'); if(bp) bp.disabled=!!s.paused;
     var br=document.getElementById('btn-resume'); if(br) br.disabled=!s.paused;
 
+    // 종목별 현황 표
+    var cEl=document.getElementById('coins');
+    if(cEl){
+      var coins = s.coins || [];
+      if(coins.length){
+        var rows='';
+        for(var i=0;i<coins.length;i++){
+          var c=coins[i];
+          var price = c.price ? fmt(c.price)+'원' : '-';
+          var hold = (c.holding && c.entry_price>0) ? ('평균 '+fmt(c.entry_price)) : '<span class="muted">현금</span>';
+          var unreal = (c.holding && c.unreal!==null && c.unreal!==undefined)
+                     ? '<span class="'+(c.unreal>=0?'green':'red')+'">'+signed(c.unreal,2)+'%</span>'
+                     : '<span class="muted">-</span>';
+          var pnl='<span class="'+(c.pnl>=0?'green':'red')+'">'+signed(c.pnl)+'</span>';
+          var roi='<span class="'+(c.roi>=0?'green':'red')+'">'+signed(c.roi,2)+'%</span>';
+          rows+='<tr><td><b>'+c.coin+'</b></td><td>'+price+'</td><td>'+hold+'</td><td>'+unreal
+               +'</td><td>'+pnl+'</td><td>'+roi+'</td><td>'+Math.round(c.win_rate||0)+'%</td><td>'+(c.trade_count||0)+'</td></tr>';
+        }
+        cEl.innerHTML='<div class="tbl-wrap"><table class="db"><tr><th>종목</th><th>현재가</th><th>보유</th>'
+                     +'<th>평가손익</th><th>실현손익</th><th>수익률</th><th>승률</th><th>매매</th></tr>'+rows+'</table></div>';
+      } else {
+        cEl.innerHTML='<div class="empty">데이터 없음</div>';
+      }
+    }
+
+    // 최근 매매 (전 종목 합쳐서)
     var tEl=document.getElementById('trades');
     if(tEl){
-      if(s.trades && s.trades.length){
+      var trd = s.trades || [];
+      if(trd.length){
         var rows='';
-        for(var i=0;i<s.trades.length;i++){
-          var t=s.trades[i];
+        for(var j=0;j<trd.length;j++){
+          var t=trd[j];
           var side = t.side==='buy' ? '<span class="green">매수</span>' : '<span class="red">매도</span>';
           var pl='<span class="muted">-</span>';
           if(t.side==='sell' && t.pnl!==null && t.pnl!==undefined)
             pl='<span class="'+(t.pnl>=0?'green':'red')+'">'+signed(t.pnl)+'</span>';
-          rows+='<tr><td>'+t.time+'</td><td>'+side+'</td><td>'+fmt(t.price)+'</td><td>'+fmt(t.krw)+'</td><td>'+pl+'</td></tr>';
+          rows+='<tr><td>'+t.time+'</td><td>'+t.coin+'</td><td>'+side+'</td><td>'+fmt(t.price)+'</td><td>'+fmt(t.krw)+'</td><td>'+pl+'</td></tr>';
         }
-        tEl.innerHTML='<table><tr><th>시각</th><th>구분</th><th>가격</th><th>금액(원)</th><th>손익(원)</th></tr>'+rows+'</table>';
+        tEl.innerHTML='<div class="tbl-wrap"><table class="db"><tr><th>시각</th><th>종목</th><th>구분</th>'
+                     +'<th>가격</th><th>금액(원)</th><th>손익(원)</th></tr>'+rows+'</table></div>';
       } else {
         tEl.innerHTML='<div class="empty">아직 매매 기록이 없어요. 신호가 뜨면 여기에 쌓입니다.</div>';
       }
@@ -318,78 +340,39 @@ DASH_JS = """
 @app.route("/")
 @require_auth
 def index():
-    st = read_state()
-    price = current_price()
     paused = read_paused()
-    roi, win_rate, unreal = compute_stats(st, price)
     live = not CONFIG["DRY_RUN"]
+    coins = coins_list()
+    primary = CONFIG["TICKER"] if CONFIG["TICKER"] in coins else coins[0]
 
     mode_badge = ('<span class="badge b-live">실거래</span>' if live
                   else '<span class="badge b-dry">모의(DRY_RUN)</span>')
     state_badge = ('<span class="badge b-pause" id="badge-state">⏸ 일시정지</span>' if paused
                    else '<span class="badge b-run" id="badge-state">▶️ 매매중</span>')
 
-    pnl = st.get("realized_pnl", 0.0)
-    pnl_cls = "green" if pnl >= 0 else "red"
-    roi_cls = "green" if roi >= 0 else "red"
-
-    if st.get("holding") and st.get("entry_price", 0) > 0:
-        if unreal is not None:
-            u_txt = f'<span class="{"green" if unreal >= 0 else "red"}">{unreal:+.2f}%</span>'
-        else:
-            u_txt = '<span class="muted">-</span>'
-        hold_html = (f'보유중 · 평균매수 <b>{_won(st["entry_price"])}원</b> · '
-                     f'수량 {st.get("coin_amount", 0):.8f} · 평가손익 {u_txt}')
-    else:
-        hold_html = '<span class="muted">보유 없음 (현금)</span>'
-
-    rows = ""
-    for t in reversed(st.get("trades", [])[-15:]):
-        side = t.get("side")
-        side_html = ('<span class="green">매수</span>' if side == "buy"
-                     else '<span class="red">매도</span>')
-        when = str(t.get("time", "")).replace("T", " ")
-        if side == "sell" and t.get("pnl") is not None:
-            pl_html = f'<span class="{"green" if t["pnl"] >= 0 else "red"}">{t["pnl"]:+,.0f}</span>'
-        else:
-            pl_html = '<span class="muted">-</span>'
-        rows += (f"<tr><td>{when}</td><td>{side_html}</td><td>{_won(t.get('price'))}</td>"
-                 f"<td>{_won(t.get('krw'))}</td><td>{pl_html}</td></tr>")
-    if rows:
-        trades_block = ("<table><tr><th>시각</th><th>구분</th><th>가격</th>"
-                        "<th>금액(원)</th><th>손익(원)</th></tr>" + rows + "</table>")
-    else:
-        trades_block = '<div class="empty">아직 매매 기록이 없어요. 신호가 뜨면 여기에 쌓입니다.</div>'
-
-    price_txt = (_won(price) + "원") if price else "-"
-
     body = f"""
     <div class="wrap">
       <div class="top">
         <h1>BTC TRADING BOT</h1>
         {mode_badge}{state_badge}
-        <span class="upd">{CONFIG['TICKER']} · {CONFIG['INTERVAL']} · 갱신 <span id="upd-time">{time.strftime('%H:%M:%S')}</span></span>
+        <span class="upd">{', '.join(coins)} · {CONFIG['INTERVAL']} · 갱신 <span id="upd-time">{time.strftime('%H:%M:%S')}</span></span>
       </div>
 
       {_nav('home')}
-
-      <div class="grid">
-        <div class="card"><div class="k">현재가</div><div class="v" id="v-price" style="color:{COL['price']}">{price_txt}</div></div>
-        <div class="card"><div class="k">실현손익</div><div class="v {pnl_cls}" id="v-pnl">{pnl:+,.0f}원</div></div>
-        <div class="card"><div class="k">누적 수익률</div><div class="v {roi_cls}" id="v-roi">{roi:+.2f}%</div></div>
-        <div class="card"><div class="k">매매 / 승률</div><div class="v" id="v-trades">{st.get('trade_count', 0)}회 · {win_rate:.0f}%</div></div>
-      </div>
-
-      <div class="hold" id="hold">{hold_html}</div>
 
       <div class="ctrl">
         <form method="post" action="/pause"><button id="btn-pause" class="on-pause" {'disabled' if paused else ''}>⏸ 일시정지</button></form>
         <form method="post" action="/resume"><button id="btn-resume" class="on-resume" {'disabled' if not paused else ''}>▶️ 재개</button></form>
       </div>
 
-      <img class="chart" id="chart" src="/chart.png?t={int(time.time())}" alt="차트 로딩 중...">
+      <h2 class="sec">종목별 현황</h2>
+      <div id="coins"><div class="empty">불러오는 중…</div></div>
 
-      <div id="trades">{trades_block}</div>
+      <img class="chart" id="chart" src="/chart.png?t={int(time.time())}" alt="차트 로딩 중...">
+      <div class="muted" style="font-size:12px; margin:-10px 0 18px;">📈 차트는 {primary} 기준</div>
+
+      <h2 class="sec">최근 매매 (전 종목)</h2>
+      <div id="trades"><div class="empty">불러오는 중…</div></div>
     </div>
     """
 
@@ -402,42 +385,51 @@ def index():
 @app.route("/api/state")
 @require_auth
 def api_state():
-    """현황 데이터(숫자·보유상태·최근 매매)를 JSON 으로 돌려줍니다.
-    대시보드 화면이 페이지 새로고침 없이 이걸 주기적으로 받아 갱신합니다(깜빡임 방지)."""
-    st = read_state()
-    price = current_price()
-    paused = read_paused()
-    roi, win_rate, unreal = compute_stats(st, price)
-
+    """모든 종목의 현황(숫자·보유상태)과 합친 최근 매매를 JSON 으로 돌려줍니다.
+    대시보드가 페이지 새로고침 없이 이걸 주기적으로 받아 갱신합니다(깜빡임 방지)."""
     def safe(x):
         # JSON 은 NaN/무한대를 표현하지 못하므로 그런 값은 null 로 바꿉니다.
         if isinstance(x, float) and not math.isfinite(x):
             return None
         return x
 
-    trades = []
-    for t in reversed(st.get("trades", [])[-15:]):
-        trades.append({
-            "time": str(t.get("time", "")).replace("T", " "),
-            "side": t.get("side"),
-            "price": safe(t.get("price")),
-            "krw": safe(t.get("krw")),
-            "pnl": safe(t.get("pnl")),
+    coins_data = []
+    all_trades = []
+    for coin in coins_list():
+        st = read_state_for(coin)
+        price = current_price(coin)
+        roi, win_rate, unreal = compute_stats(st, price)
+        coins_data.append({
+            "coin": coin,
+            "price": safe(price),
+            "pnl": safe(st.get("realized_pnl", 0.0)),
+            "roi": safe(roi),
+            "win_rate": safe(win_rate),
+            "trade_count": st.get("trade_count", 0),
+            "holding": bool(st.get("holding")),
+            "entry_price": safe(st.get("entry_price", 0.0)),
+            "unreal": safe(unreal),
         })
+        for t in st.get("trades", [])[-15:]:
+            all_trades.append({
+                "coin": coin,
+                "time": str(t.get("time", "")).replace("T", " "),
+                "side": t.get("side"),
+                "price": safe(t.get("price")),
+                "krw": safe(t.get("krw")),
+                "pnl": safe(t.get("pnl")),
+            })
+
+    # 전 종목 매매를 시간 역순으로 합쳐 최근 15개만
+    all_trades.sort(key=lambda x: x["time"], reverse=True)
+    all_trades = all_trades[:15]
 
     return jsonify({
-        "price": safe(price),
-        "pnl": safe(st.get("realized_pnl", 0.0)),
-        "roi": safe(roi),
-        "win_rate": safe(win_rate),
-        "trade_count": st.get("trade_count", 0),
-        "holding": bool(st.get("holding")),
-        "entry_price": safe(st.get("entry_price", 0.0)),
-        "coin_amount": safe(st.get("coin_amount", 0.0)),
-        "unreal": safe(unreal),
-        "paused": bool(paused),
         "updated": time.strftime("%H:%M:%S"),
-        "trades": trades,
+        "paused": bool(read_paused()),
+        "live": (not CONFIG["DRY_RUN"]),
+        "coins": coins_data,
+        "trades": all_trades,
     })
 
 
