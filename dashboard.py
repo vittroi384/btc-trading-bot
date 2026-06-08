@@ -9,6 +9,9 @@
 #  - 조작: ⏸ 일시정지 / ▶️ 재개  (control.json 으로 봇과 신호를 주고받음)
 #  - 보안: 기본 인증(아이디/비번)으로 잠가둠. .env 의 DASH_USER / DASH_PASS 사용.
 #          (HTTP라 통신 자체는 암호화 안 되니, 비번을 반드시 설정해야 시작됩니다.)
+#  - 계정 2종:
+#      관리자(DASH_USER/DASH_PASS)      = 모든 기능 (현황·DB + 일시정지/재개·설정 변경)
+#      읽기 전용(DASH_VIEW_USER/PASS)   = '현황'·'DB' 보기만. 조작 버튼은 안 보이고 막힘. (선택)
 # =====================================================================
 
 import json
@@ -18,18 +21,41 @@ import threading
 import time
 from functools import wraps
 
-from flask import Flask, request, Response, redirect, send_file, jsonify
+from flask import Flask, request, Response, redirect, send_file, jsonify, g
 from waitress import serve
 from dotenv import load_dotenv
 
 load_dotenv()                  # .env 읽기 (DASH_USER / DASH_PASS / DASH_PORT 등)
 from config import CONFIG      # 거래 설정(TICKER, STATE_FILE, DB_FILE ...)
 
-CONTROL_FILE = "control.json"  # bot.py 와 공유하는 일시정지/재개 신호 파일
+CONTROL_FILE = "control.json"  # bot.py 와 공유하는 일시정지/재개·설정 신호 파일
 REPORT_PNG = "report.png"      # 차트 이미지 파일
+
+# 버튼으로 바꿀 수 있는 설정 (값, 화면에 보일 라벨). bot.py 의 허용목록과 맞춰둠.
+SELL_OPTS = [("legacy", "빠른청산"), ("trend", "추세추종"), ("meanrev", "되돌림"), ("split", "이유별")]
+BUY_OPTS = [("all", "전체"), ("dip_only", "눌림목만")]
+INTERVAL_OPTS = [("minute60", "1시간"), ("minute240", "4시간")]
+INTERVAL_LABEL = {"minute60": "1시간봉", "minute240": "4시간봉"}
+# (control.json 키, CONFIG 키, 허용값들)
+SETTING_MAP = {
+    "sell_mode": ("SELL_MODE", [v for v, _ in SELL_OPTS]),
+    "buy_mode": ("BUY_MODE", [v for v, _ in BUY_OPTS]),
+    "interval": ("INTERVAL", [v for v, _ in INTERVAL_OPTS]),
+}
+
+# 장세(레짐) 프리셋: 버튼 하나로 매수·매도 조합을 한 번에 설정.
+#  (key, 화면 라벨, {바꿀 설정들}, 한 줄 설명)
+REGIME_PRESETS = [
+    ("up",    "📈 상승장", {"buy_mode": "all",      "sell_mode": "trend"},  "올라타서 끝까지"),
+    ("range", "↔️ 횡보장", {"buy_mode": "all",      "sell_mode": "legacy"}, "싸면 사서 오르면 바로"),
+    ("down",  "📉 하락장", {"buy_mode": "dip_only", "sell_mode": "legacy"}, "싼 것만 조금, 거의 현금"),
+]
 
 DASH_USER = os.getenv("DASH_USER", "")
 DASH_PASS = os.getenv("DASH_PASS", "")
+# 읽기 전용(뷰어) 계정: '현황'과 'DB' 보기만 가능. 일시정지/재개·설정 변경은 불가. (안 넣으면 비활성)
+DASH_VIEW_USER = os.getenv("DASH_VIEW_USER", "")
+DASH_VIEW_PASS = os.getenv("DASH_VIEW_PASS", "")
 DASH_PORT = int(os.getenv("DASH_PORT", "80"))
 
 app = Flask(__name__)
@@ -43,20 +69,55 @@ COL = {
 }
 
 
-# ---------- 비밀번호(HTTP 기본 인증) ----------
-def _check(u, p):
-    """아이디/비번이 .env 에 설정된 값과 정확히 일치하는지 확인."""
-    return bool(DASH_USER) and bool(DASH_PASS) and u == DASH_USER and p == DASH_PASS
+# ---------- 비밀번호(HTTP 기본 인증) + 권한(관리자 / 읽기 전용) ----------
+def _role(u, p):
+    """아이디/비번을 확인해 '권한'을 돌려줍니다.
+       'admin'  = 관리자 (모든 조작 가능)
+       'viewer' = 읽기 전용 (현황·DB 보기만, 조작 불가)
+       None     = 로그인 실패
+    관리자와 읽기전용 비번이 같으면 관리자로 인정합니다(관리자 우선)."""
+    if DASH_USER and DASH_PASS and u == DASH_USER and p == DASH_PASS:
+        return "admin"
+    if DASH_VIEW_USER and DASH_VIEW_PASS and u == DASH_VIEW_USER and p == DASH_VIEW_PASS:
+        return "viewer"
+    return None
+
+
+def _auth_role():
+    """지금 요청의 로그인 정보를 보고 권한을 돌려줍니다. (로그인 안 했으면 None)"""
+    a = request.authorization
+    return _role(a.username, a.password) if a else None
+
+
+def _need_login():
+    """로그인 창을 띄우는 401 응답."""
+    return Response("로그인이 필요합니다.", 401,
+                    {"WWW-Authenticate": 'Basic realm="btc-trading-bot"'})
 
 
 def require_auth(fn):
-    """이 표시가 붙은 화면은 로그인(기본 인증)을 통과해야 볼 수 있게 합니다."""
+    """로그인(관리자 또는 읽기 전용)만 통과하면 볼 수 있는 화면.
+    통과하면 g.role 에 권한('admin'/'viewer')을 담아 둡니다(화면에서 버튼 표시 여부에 사용)."""
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        a = request.authorization
-        if not a or not _check(a.username, a.password):
-            return Response("로그인이 필요합니다.", 401,
-                            {"WWW-Authenticate": 'Basic realm="btc-trading-bot"'})
+        role = _auth_role()
+        if not role:
+            return _need_login()
+        g.role = role
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def require_admin(fn):
+    """'조작'(일시정지/재개·장세·설정 변경)은 관리자만. 읽기 전용 계정은 403으로 막습니다."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        role = _auth_role()
+        if not role:
+            return _need_login()
+        if role != "admin":
+            return Response("권한이 없습니다. 읽기 전용 계정은 조작할 수 없어요.", 403)
+        g.role = role
         return fn(*args, **kwargs)
     return wrapper
 
@@ -71,19 +132,45 @@ def read_state():
         return {}
 
 
-def read_paused():
-    """control.json 을 읽어 '일시정지 중인지' 돌려줍니다. (없으면 False)"""
+def read_control():
+    """control.json 전체를 딕셔너리로 읽어옵니다. (없거나 깨졌으면 빈 딕셔너리)"""
     try:
         with open(CONTROL_FILE, "r", encoding="utf-8") as fp:
-            return bool(json.load(fp).get("paused", False))
+            d = json.load(fp)
+            return d if isinstance(d, dict) else {}
     except Exception:
-        return False
+        return {}
+
+
+def write_control(updates):
+    """control.json 의 '일부 키만' 갱신해 저장합니다(merge). 다른 키는 보존.
+    임시파일에 쓴 뒤 교체해서, 봇이 읽는 도중에도 깨진 파일을 보지 않게 합니다."""
+    d = read_control()
+    d.update(updates)
+    tmp = CONTROL_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(d, fp, ensure_ascii=False)
+    os.replace(tmp, CONTROL_FILE)
+
+
+def read_paused():
+    """control.json 을 읽어 '일시정지 중인지' 돌려줍니다. (없으면 False)"""
+    return bool(read_control().get("paused", False))
 
 
 def write_paused(value):
-    """일시정지/재개 상태를 control.json 에 기록합니다. (봇이 매 루프 읽어서 따름)"""
-    with open(CONTROL_FILE, "w", encoding="utf-8") as fp:
-        json.dump({"paused": bool(value)}, fp)
+    """일시정지/재개 상태만 갱신합니다. (모드·봉 설정은 보존)"""
+    write_control({"paused": bool(value)})
+
+
+def effective(ckey):
+    """지금 '실제로 적용 중인' 설정값을 돌려줍니다.
+    control.json 에 (대시보드로 바꾼) 값이 있으면 그걸, 없으면 .env(CONFIG) 기본값을."""
+    cfg_key, valid = SETTING_MAP[ckey]
+    v = read_control().get(ckey)
+    if isinstance(v, str) and v in valid:
+        return v
+    return CONFIG.get(cfg_key)
 
 
 def current_price(ticker):
@@ -110,16 +197,23 @@ def read_state_for(coin):
 
 
 def compute_stats(st, price):
-    """state 로부터 누적 수익률·승률·평가손익(%)을 계산합니다. (trader.stats 와 동일 공식)"""
+    """state 로부터 누적 수익률·승률·평가손익(%)·평가손익(원)을 계산합니다. (trader.stats 와 동일 공식)
+       roi         : 누적 실현 수익률(%)
+       win_rate    : 승률(%)
+       unreal      : 평가손익률(%)   ― (현재가 - 평균매수가) / 평균매수가 × 100
+       unreal_krw  : 평가손익 금액(원) ― (현재가 - 평균매수가) × 보유수량
+                     = '지금 현재가로 팔면' 늘어나거나(+) 줄어드는(-) 원화. 화면의 %와 같은 기준."""
     trades = st.get("trades", [])
     invested = sum(t.get("krw", 0) for t in trades if t.get("side") == "buy")
     roi = (st.get("realized_pnl", 0.0) / invested * 100) if invested > 0 else 0.0
     sells = st.get("sell_count", 0)
     win_rate = (st.get("win_count", 0) / sells * 100) if sells > 0 else 0.0
-    unreal = None
+    unreal = unreal_krw = None
     if st.get("holding") and price and st.get("entry_price", 0) > 0:
-        unreal = (price - st["entry_price"]) / st["entry_price"] * 100
-    return roi, win_rate, unreal
+        entry = st["entry_price"]
+        unreal = (price - entry) / entry * 100
+        unreal_krw = (price - entry) * st.get("coin_amount", 0.0)
+    return roi, win_rate, unreal, unreal_krw
 
 
 def ensure_chart():
@@ -177,6 +271,36 @@ def _table_html(headers, rows):
     return f'<div class="tbl-wrap"><table class="db"><tr>{head}</tr>{body}</table></div>'
 
 
+def _mode_buttons(field, options, active):
+    """설정 버튼 한 줄을 만든다(각 버튼 = 작은 form). 지금 적용 중인 값이면 강조 표시.
+    버튼은 .ctrl 이 아닌 .modes 안에 있어 일반 POST→새로고침으로 동작(활성표시 즉시 갱신)."""
+    out = ""
+    for val, label in options:
+        cls = "mbtn active" if val == active else "mbtn"
+        out += (f'<form method="post" action="/set/{field}/{val}">'
+                f'<button class="{cls}">{label}</button></form>')
+    return out
+
+
+def _regime_buttons(eff_buy, eff_sell):
+    """장세 버튼 한 줄. 지금 매수·매도 조합과 일치하는 장세를 강조."""
+    out = ""
+    for key, label, s, _desc in REGIME_PRESETS:
+        active = (s["buy_mode"] == eff_buy and s["sell_mode"] == eff_sell)
+        cls = "mbtn active" if active else "mbtn"
+        out += (f'<form method="post" action="/preset/{key}">'
+                f'<button class="{cls}">{label}</button></form>')
+    return out
+
+
+def _current_regime_name(eff_buy, eff_sell):
+    """지금 설정이 어느 장세 프리셋과 같은지 라벨을 돌려준다. 없으면 None."""
+    for _key, label, s, _desc in REGIME_PRESETS:
+        if s["buy_mode"] == eff_buy and s["sell_mode"] == eff_sell:
+            return label
+    return None
+
+
 CSS = """
 <style>
   * { box-sizing: border-box; }
@@ -204,12 +328,27 @@ CSS = """
   .ctrl button.on-pause { border-color:#ffb454; color:#ffb454; }
   .ctrl button.on-resume{ border-color:#22d39a; color:#22d39a; }
   .ctrl button:disabled { opacity:0.35; cursor:default; }
+  .modes { display:flex; flex-direction:column; gap:8px; margin-bottom:18px; }
+  .mrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .mrow .mlabel { width:44px; flex:0 0 auto; color:#8b93a7; font-size:13px; }
+  .mrow form { flex:1 1 0; min-width:84px; margin:0; }
+  .mbtn { width:100%; padding:9px 6px; border-radius:10px; border:1px solid #283250;
+          background:#192032; color:#8b93a7; font-size:13px; font-family:inherit; cursor:pointer; }
+  .mbtn:hover { border-color:#3a4560; }
+  .mbtn.active { color:#e7ebf5; border-color:#3ec6ff; background:#1b2942; font-weight:700; }
+  .adv { margin:2px 0 14px; }
+  .adv > summary { color:#8b93a7; font-size:13px; cursor:pointer; padding:6px 0; list-style:none; }
+  .adv > summary::before { content:"▸ "; }
+  .adv[open] > summary::before { content:"▾ "; }
+  .adv > summary:hover { color:#e7ebf5; }
   img.chart { width:100%; border-radius:12px; border:1px solid #283250; display:block; margin-bottom:18px; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th,td { text-align:right; padding:8px 10px; border-bottom:1px solid #222a40; }
   th:first-child, td:first-child { text-align:left; }
   th { color:#8b93a7; font-weight:600; }
   .green { color:#22d39a; } .red { color:#ff5470; } .muted { color:#8b93a7; }
+  .sub { font-size:11px; margin-top:2px; opacity:.92; }   /* 평가손익 % 아래 '원' 금액 줄 */
+  .b-view { color:#3ec6ff; border-color:#3ec6ff; }        /* 읽기 전용 계정 배지 */
   .empty { color:#8b93a7; padding:18px 4px; }
   .nav { display:flex; gap:8px; margin-bottom:16px; }
   .nav a { padding:8px 16px; border-radius:10px; border:1px solid #283250; color:#8b93a7;
@@ -263,9 +402,15 @@ DASH_JS = """
           var c=coins[i];
           var price = c.price ? fmt(c.price)+'원' : '-';
           var hold = (c.holding && c.entry_price>0) ? ('평균 '+fmt(c.entry_price)) : '<span class="muted">현금</span>';
-          var unreal = (c.holding && c.unreal!==null && c.unreal!==undefined)
-                     ? '<span class="'+(c.unreal>=0?'green':'red')+'">'+signed(c.unreal,2)+'%</span>'
-                     : '<span class="muted">-</span>';
+          var unreal = '<span class="muted">-</span>';
+          if(c.holding && c.unreal!==null && c.unreal!==undefined){
+            var uc = (c.unreal>=0?'green':'red');
+            var pctTxt = '<span class="'+uc+'">'+signed(c.unreal,2)+'%</span>';
+            // 평가손익 금액(원): 지금 현재가로 팔면 늘어나/줄어드는 원화. %와 같은 기준.
+            var krwTxt = (c.unreal_krw!==null && c.unreal_krw!==undefined)
+                       ? '<div class="sub '+uc+'">'+signed(c.unreal_krw)+'원</div>' : '';
+            unreal = pctTxt + krwTxt;
+          }
           var pnl='<span class="'+(c.pnl>=0?'green':'red')+'">'+signed(c.pnl)+'</span>';
           var roi='<span class="'+(c.roi>=0?'green':'red')+'">'+signed(c.roi,2)+'%</span>';
           rows+='<tr><td><b>'+c.coin+'</b></td><td>'+price+'</td><td>'+hold+'</td><td>'+unreal
@@ -349,22 +494,70 @@ def index():
                   else '<span class="badge b-dry">모의(DRY_RUN)</span>')
     state_badge = ('<span class="badge b-pause" id="badge-state">⏸ 일시정지</span>' if paused
                    else '<span class="badge b-run" id="badge-state">▶️ 매매중</span>')
+    # 권한 확인: 관리자(admin)면 조작 버튼을 보여주고, 읽기 전용(viewer)이면 숨깁니다.
+    is_admin = (getattr(g, "role", "admin") == "admin")
+    view_badge = '' if is_admin else '<span class="badge b-view">👁 읽기전용</span>'
 
-    body = f"""
-    <div class="wrap">
-      <div class="top">
-        <h1>BTC TRADING BOT</h1>
-        {mode_badge}{state_badge}
-        <span class="upd">{', '.join(coins)} · {CONFIG['INTERVAL']} · 갱신 <span id="upd-time">{time.strftime('%H:%M:%S')}</span></span>
-      </div>
+    # 지금 '실제로 적용 중인' 설정(대시보드로 바꾼 값 우선, 없으면 .env 기본값)
+    eff_sell, eff_buy, eff_itv = effective("sell_mode"), effective("buy_mode"), effective("interval")
+    itv_disp = INTERVAL_LABEL.get(eff_itv, eff_itv)
+    regime_btns = _regime_buttons(eff_buy, eff_sell)
+    regime_name = _current_regime_name(eff_buy, eff_sell)
+    regime_now = f"장세 <b>{regime_name}</b> · " if regime_name else "장세 <b>사용자설정</b> · "
+    sell_btns = _mode_buttons("sell_mode", SELL_OPTS, eff_sell)
+    buy_btns = _mode_buttons("buy_mode", BUY_OPTS, eff_buy)
+    itv_btns = _mode_buttons("interval", INTERVAL_OPTS, eff_itv)
+    env_itv_disp = INTERVAL_LABEL.get(CONFIG['INTERVAL'], CONFIG['INTERVAL'])
 
-      {_nav('home')}
-
+    # 조작 영역(일시정지/재개 · 장세 · 세부 설정)은 '관리자'에게만 보여줍니다.
+    # 읽기 전용 계정에는 지금 적용 중인 설정 안내문만 보여 줍니다(버튼 없음).
+    if is_admin:
+        controls_html = f"""
       <div class="ctrl">
         <form method="post" action="/pause"><button id="btn-pause" class="on-pause" {'disabled' if paused else ''}>⏸ 일시정지</button></form>
         <form method="post" action="/resume"><button id="btn-resume" class="on-resume" {'disabled' if not paused else ''}>▶️ 재개</button></form>
       </div>
 
+      <h2 class="sec">장세 (버튼 누르면 즉시 적용)</h2>
+      <div class="modes">
+        <div class="mrow"><span class="mlabel">장세</span>{regime_btns}</div>
+        <div class="mrow"><span class="mlabel">봉</span>{itv_btns}</div>
+      </div>
+      <div class="muted" style="font-size:12px; margin:-6px 0 10px;">
+        📈 상승장 = 올라타서 끝까지 &nbsp;·&nbsp; ↔️ 횡보장 = 싸면 사서 오르면 바로 &nbsp;·&nbsp; 📉 하락장 = 싼 것만 조금, 거의 현금
+      </div>
+
+      <details class="adv">
+        <summary>세부 설정 (매수·매도 직접 고르기)</summary>
+        <div class="modes" style="margin-top:8px;">
+          <div class="mrow"><span class="mlabel">매도</span>{sell_btns}</div>
+          <div class="mrow"><span class="mlabel">매수</span>{buy_btns}</div>
+        </div>
+      </details>
+
+      <div class="muted" style="font-size:12px; margin:6px 0 18px;">
+        지금 적용: {regime_now}봉 <b>{itv_disp}</b>
+        &nbsp;|&nbsp; 차트·DB는 .env 봉({env_itv_disp}) 기준
+      </div>
+"""
+    else:
+        controls_html = f"""
+      <div class="muted" style="font-size:12px; margin:2px 0 18px;">
+        👁 읽기 전용 계정입니다. 현황·DB 보기만 가능해요.
+        &nbsp;|&nbsp; 지금 적용: {regime_now}봉 <b>{itv_disp}</b>
+      </div>
+"""
+
+    body = f"""
+    <div class="wrap">
+      <div class="top">
+        <h1>BTC TRADING BOT</h1>
+        {mode_badge}{state_badge}{view_badge}
+        <span class="upd">{', '.join(coins)} · {itv_disp} · 갱신 <span id="upd-time">{time.strftime('%H:%M:%S')}</span></span>
+      </div>
+
+      {_nav('home')}
+      {controls_html}
       <h2 class="sec">종목별 현황</h2>
       <div id="coins"><div class="empty">불러오는 중…</div></div>
 
@@ -398,7 +591,7 @@ def api_state():
     for coin in coins_list():
         st = read_state_for(coin)
         price = current_price(coin)
-        roi, win_rate, unreal = compute_stats(st, price)
+        roi, win_rate, unreal, unreal_krw = compute_stats(st, price)
         coins_data.append({
             "coin": coin,
             "price": safe(price),
@@ -409,6 +602,7 @@ def api_state():
             "holding": bool(st.get("holding")),
             "entry_price": safe(st.get("entry_price", 0.0)),
             "unreal": safe(unreal),
+            "unreal_krw": safe(unreal_krw),
         })
         for t in st.get("trades", [])[-15:]:
             all_trades.append({
@@ -443,16 +637,40 @@ def chart_png():
 
 
 @app.route("/pause", methods=["POST"])
-@require_auth
+@require_admin
 def pause():
     write_paused(True)
     return redirect("/")
 
 
 @app.route("/resume", methods=["POST"])
-@require_auth
+@require_admin
 def resume():
     write_paused(False)
+    return redirect("/")
+
+
+@app.route("/set/<field>/<value>", methods=["POST"])
+@require_admin
+def set_setting(field, value):
+    """대시보드 설정 버튼이 호출합니다. 허용된 (field, value)만 control.json 에 기록 →
+    봇이 다음 루프에서 읽어 즉시 반영합니다. 허용 외 값은 무시(봇 보호)."""
+    field = (field or "").strip().lower()
+    value = (value or "").strip()
+    if field in SETTING_MAP and value in SETTING_MAP[field][1]:
+        write_control({field: value})
+    return redirect("/")
+
+
+@app.route("/preset/<name>", methods=["POST"])
+@require_admin
+def set_preset(name):
+    """장세 버튼이 호출. 그 장세에 맞는 매수·매도 조합을 한 번에 control.json 에 기록."""
+    name = (name or "").strip().lower()
+    for key, _label, settings, _desc in REGIME_PRESETS:
+        if key == name:
+            write_control(settings)
+            break
     return redirect("/")
 
 
@@ -542,5 +760,9 @@ if __name__ == "__main__":
             "비밀번호 없이는 대시보드를 열 수 없어요. .env 에 아래를 추가하세요:\n"
             "    DASH_USER=admin\n    DASH_PASS=원하는_강한_비밀번호\n"
         )
-    print(f"대시보드 시작 → http://0.0.0.0:{DASH_PORT}  (아이디: {DASH_USER})")
+    print(f"대시보드 시작 → http://0.0.0.0:{DASH_PORT}  (관리자 아이디: {DASH_USER})")
+    if DASH_VIEW_USER and DASH_VIEW_PASS:
+        print(f"  · 읽기 전용 계정 활성화 (아이디: {DASH_VIEW_USER}) — 현황·DB 보기만 가능")
+    else:
+        print("  · 읽기 전용 계정 없음 (.env 에 DASH_VIEW_USER / DASH_VIEW_PASS 추가하면 생성)")
     serve(app, host="0.0.0.0", port=DASH_PORT)
