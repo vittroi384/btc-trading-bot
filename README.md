@@ -7,6 +7,18 @@
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+## 스크린샷
+
+> 아래 그림은 **가짜(랜덤 생성) 시세 데이터**로 로컬에서 띄운 화면입니다.
+
+![웹 대시보드](assets/dashboard.png)
+
+*웹 대시보드 — 현황·수익률·차트, 일시정지/재개, 장세 프리셋 (DRY_RUN 모의 모드)*
+
+![리포트 차트](assets/report.png)
+
+*자동 생성 리포트 — 캔들 + 볼린저밴드 + 장기 이평선 + 매수/매도 마커*
+
 업비트 시세를 **수집 → 저장 → 가공 → 품질검사 → 분석/시각화**하는 데이터 파이프라인과,
 그 데이터를 활용해 규칙대로 매매하고 텔레그램·웹 대시보드로 보고하는 자동매매 봇.
 
