@@ -13,7 +13,7 @@
 
 ![웹 대시보드](assets/dashboard.png)
 
-*웹 대시보드 — 현황·수익률·차트, 일시정지/재개, 장세 프리셋 (DRY_RUN 모의 모드)*
+*웹 대시보드 — 현황·수익률·차트, 일시정지/재개, 장세 프리셋(UI만, 전략 미연결) (DRY_RUN 모의 모드)*
 
 ![리포트 차트](assets/report-sample.png)
 
@@ -36,10 +36,10 @@
 ## 주요 기능
 
 - **데이터 파이프라인**: 업비트 캔들 수집(UPSERT 멱등 적재) → 지표 계산(이평선·RSI·볼린저·일목) → 데이터 품질검사(빠진 봉·결측치·신선도) → 실패 시 텔레그램 알림
-- **자동매매 봇**: 지표 기반 매수/매도 규칙, 멀티코인(`TICKERS`), 추세 필터·트레일링 스탑, 손절/익절, 모의매매(DRY_RUN)
+- **자동매매 봇**: 지표 기반 매수/매도 규칙, 멀티코인(`TICKERS`; 수집은 1종목, 봇만 멀티코인), 추세 필터·트레일링 스탑, 손절/익절, 모의매매(DRY_RUN)
 - **백테스트**: 과거 데이터로 전략 성적 검증 (`backtest.py`)
 - **텔레그램 봇**: 상태/통계 조회, 차트 버튼, 일시정지·재개·종료 명령
-- **웹 대시보드**: 현황·캔들차트·DB 표(시세/지표/매매기록) 조회, 일시정지/재개 — 기본 인증(관리자/읽기 전용 계정 분리)
+- **웹 대시보드**: 현황·캔들차트·DB 표(시세/지표/매매기록) 조회, 일시정지/재개, 장세 프리셋(UI만, 전략 미연결) — 기본 인증(관리자/읽기 전용 계정 분리)
 - **운영**: systemd 서비스로 24시간 실행, GitHub Actions CI(컴파일·임포트 검사)
 
 ## 아키텍처
@@ -53,23 +53,24 @@
                                             [품질검사]
                                            (quality.py) ──▶ dq_checks
                                                   │
-                          ┌───────────────────────┴───────────────────────┐
-                          ▼                                                ▼
-                   매매봇 (bot.py)                                 분석/시각화
-                   - 지표로 매수/매도 판단                          - report.py: 요약 + 차트(PNG)
-                   - 텔레그램 알림                                  - dashboard.py: 웹 대시보드
-                   - 매매기록 → trades 테이블
-                          │
-                   ┌──────┴──────┐
+                                                  ▼
+                                            분석/시각화 (창고 데이터의 소비자)
+                                            - report.py: 요약 + 차트(PNG)
+                                            - dashboard.py: 웹 대시보드
+
+업비트 API ──▶ 매매봇 (bot.py) ──▶ trades 테이블
+ (캔들 직접 조회)  - 받은 캔들로 지표 계산 → 매수/매도 판단 (창고의 indicators 는 읽지 않음)
+                   - 텔레그램 알림
+
               데이터 창고 (SQLite, db.py): raw_candles / indicators / trades / dq_checks
 ```
 
 - **수집(ingest)**: 거래소에서 캔들을 받아 원본 그대로 저장 (UPSERT → 중복 없음 = 멱등성)
 - **가공(transform)**: 원본으로 지표(이평선·RSI·볼린저·일목) 계산해 저장
 - **품질검사(quality)**: 빠진 봉·결측치·신선도 점검 → 문제 시 텔레그램 알림
-- **오케스트레이션(pipeline)**: 위 단계를 순서대로(DAG) 주기 실행 + 실패 처리·로깅
+- **오케스트레이션(pipeline)**: 위 단계를 순서대로 주기 실행(단순 루프, 재시도·의존성 없음) + 실패 알림·로깅
 - **서빙(report/dashboard)**: 창고 데이터로 요약·차트·웹 화면 제공
-- **소비자(bot)**: 데이터를 활용해 매매, 결과를 다시 창고에 적재
+- **소비자(bot)**: 거래소를 직접 조회해 매매, 결과(trades)만 창고에 적재. 창고 데이터의 소비자는 report·dashboard
 
 ## 파일 구성
 
@@ -120,7 +121,7 @@ cp .env.example .env
 nano .env     # 텔레그램 토큰/chat id, (실거래 시) 업비트 키, 거래 설정 입력
 ```
 - 텔레그램 봇: `@BotFather` 로 토큰, `@userinfobot` 으로 chat id. **봇한테 메시지 한 번 먼저 보낼 것.**
-- 처음엔 `DRY_RUN=true` 유지. 전략 파라미터·매수/매도 방식(`BUY_MODE`/`SELL_MODE`)도 `.env`에서 조정.
+- 처음엔 `DRY_RUN=true` 유지. 전략 파라미터(`MA_SHORT`/`MA_LONG`·`RSI_*`·`BB_*`)와 리스크 설정(`STOP_LOSS_PCT`·`TAKE_PROFIT_PCT`·`TRAIL_STOP_PCT`·`USE_TREND_FILTER`·`TREND_MA`)도 `.env`에서 조정. `config.py`가 읽는 키 전체는 `.env.example` 참고.
 - 대시보드를 쓰려면 `.env`에 `DASH_USER`/`DASH_PASS`(관리자), 선택으로 `DASH_VIEW_USER`/`DASH_VIEW_PASS`(읽기 전용)를 추가.
 
 ## 실행 순서
@@ -186,6 +187,20 @@ journalctl -u pipeline -f      # 로그 실시간 확인
 | `quality.py` | Great Expectations / dbt tests | 데이터 품질 검증 |
 | UPSERT | idempotent write | 멱등성 |
 | `report.py` / `dashboard.py` | Grafana / Metabase | 서빙·BI |
+
+Airflow 대비 없는 것: 재시도·의존성·백필·락·실행 이력 UI.
+
+## 알려진 한계
+
+- 신선도 검사가 서버 시간대 KST를 전제한다 (`quality.py:69-73` — tz 정보 없는 캔들 시각을 `datetime.now()`와 그대로 비교).
+- 진행 중 봉으로 신호를 판단한다 (`bot.py:193`이 받는 마지막 행은 아직 닫히지 않은 봉, `strategy.py:120`이 그 행으로 판단). 닫힌 봉만 쓰는 백테스트(`backtest.py`)와 결과가 다르다.
+- 손익은 추정치다 (`trader.py:207,219` — 주문 직전 조회 가격 × 수량 × (1 − 수수료). 실제 체결가·슬리피지 미반영).
+- 일일 손실 한도·포지션 상한이 없다 (`trader.py:252` `check_risk`는 포지션 단위 손절·익절·트레일링만).
+- 대시보드는 HTTP Basic Auth이고 TLS가 없다 (`dashboard.py:95,768` — waitress가 0.0.0.0에 평문 HTTP로 바인딩). 외부 노출 시 리버스 프록시로 TLS를 붙여야 한다.
+- pipeline·bot·dashboard 세 프로세스가 같은 SQLite 파일에 쓴다 (`db.py:30-31` WAL + timeout 30초로 완화, 잠금 충돌 시 예외).
+- 단위 테스트가 없다. CI(`.github/workflows/ci.yml`)는 컴파일·임포트 검사만 한다.
+
+수익률을 적지 않은 이유: 진행 중 봉·추정 손익·슬리피지 미반영.
 
 ## 라이선스
 
