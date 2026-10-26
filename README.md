@@ -44,26 +44,7 @@
 
 ## 아키텍처
 
-```
-   ┌─────────── 데이터 파이프라인 (pipeline.py) ──────────┐
-   │                                                      │
-업비트 API ──▶ [수집] ──▶ raw_candles ──▶ [가공] ──▶ indicators
- (ingest.py)              (원본 시세)    (transform.py)   (지표)
-                                                  │
-                                            [품질검사]
-                                           (quality.py) ──▶ dq_checks
-                                                  │
-                                                  ▼
-                                            분석/시각화 (창고 데이터의 소비자)
-                                            - report.py: 요약 + 차트(PNG)
-                                            - dashboard.py: 웹 대시보드
-
-업비트 API ──▶ 매매봇 (bot.py) ──▶ trades 테이블
- (캔들 직접 조회)  - 받은 캔들로 지표 계산 → 매수/매도 판단 (창고의 indicators 는 읽지 않음)
-                   - 텔레그램 알림
-
-              데이터 창고 (SQLite, db.py): raw_candles / indicators / trades / dq_checks
-```
+![데이터 파이프라인 + 자동매매 봇 아키텍처](assets/architecture.png)
 
 - **수집(ingest)**: 거래소에서 캔들을 받아 원본 그대로 저장 (UPSERT → 중복 없음 = 멱등성)
 - **가공(transform)**: 원본으로 지표(이평선·RSI·볼린저·일목) 계산해 저장
